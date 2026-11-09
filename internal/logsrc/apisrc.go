@@ -252,3 +252,46 @@ func (a *DockerAPI) Stats(ctx context.Context, id string) (*ContainerStats, erro
 	}
 	return &out, nil
 }
+
+// DaemonInfo 是 GET /info 里与读日志相关的那部分字段。
+type DaemonInfo struct {
+	// DockerRootDir 是守护进程**实际生效**的 data-root。
+	// 它会反映命令行 --data-root、systemd 单元里的覆盖等所有来源，
+	// 所以比读 daemon.json 更权威——文件里写的不一定就是跑起来的配置。
+	DockerRootDir string `json:"DockerRootDir"`
+	// LoggingDriver 是默认日志驱动（json-file / journald / local 等）。
+	LoggingDriver string `json:"LoggingDriver"`
+}
+
+// Info 读取守护进程的运行配置，用于定位 data-root。
+//
+// 用 /info 而不是 /version：只有 /info 带 DockerRootDir。
+func (a *DockerAPI) Info(ctx context.Context) (*DaemonInfo, error) {
+	// 主机名随便写，Transport 会无视它直接连 socket / 注入的地址。
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, "http://docker/info", nil)
+	if err != nil {
+		return nil, err
+	}
+
+	resp, err := a.client.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("访问 docker socket（%s）失败: %w", a.socket, err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 2048))
+		return nil, fmt.Errorf("docker /info 返回 %s: %s", resp.Status, strings.TrimSpace(string(body)))
+	}
+
+	// /info 的响应可能到几百 KB（插件、镜像统计、驱动明细都在里面），
+	// 限制上限避免异常响应撑爆内存；我们只取两个字段，其余由 Decoder 丢弃。
+	var out DaemonInfo
+	if err := json.NewDecoder(io.LimitReader(resp.Body, 8<<20)).Decode(&out); err != nil {
+		return nil, fmt.Errorf("解析 docker /info 响应失败: %w", err)
+	}
+	if strings.TrimSpace(out.DockerRootDir) == "" {
+		return nil, fmt.Errorf("docker /info 未返回 DockerRootDir")
+	}
+	return &out, nil
+}

@@ -28,6 +28,7 @@ type Source string
 
 const (
 	SourceFlag       Source = "flag"        // 启动参数 -data-root 显式指定
+	SourceDockerAPI  Source = "docker-api"  // docker socket 的 GET /info
 	SourceDaemonJSON Source = "daemon.json" // /etc/docker/daemon.json
 	SourceDockerCLI  Source = "docker-cli"  // docker info --format
 	SourceDefault    Source = "default"     // 编译期兜底的默认路径
@@ -69,6 +70,15 @@ func (d DaemonConfig) Driver() string {
 	return "json-file"
 }
 
+// SocketInfo 是通过 docker socket 问到的守护进程配置。
+// 定义在这里而不是直接引用 logsrc，是为了避免两个包互相依赖。
+type SocketInfo struct {
+	// DataRoot 是宿主机语义的 data-root（如 /app/docker/data）。
+	DataRoot string
+	// LogDriver 是默认日志驱动。
+	LogDriver string
+}
+
 // Options 是 Resolve 的输入。
 type Options struct {
 	// DataRoot 是用户显式指定的宿主机路径，一旦指定就必须存在，不再兜底。
@@ -77,9 +87,13 @@ type Options struct {
 	HostRoot string
 	// DaemonJSON 自定义 daemon.json 路径，留空则用 <hostRoot>/etc/docker/daemon.json。
 	DaemonJSON string
+	// ProbeInfo 通过 docker socket 读取守护进程实际配置（GET /info）。
+	// 为 nil 表示没有 socket 可用（-no-api 或没挂），此时只能靠文件和 CLI。
+	// 拿到的是最权威的值：它反映守护进程真正在用的配置，而不是配置文件写了什么。
+	ProbeInfo func(ctx context.Context) (SocketInfo, error)
 	// SkipCLI 为 true 时不再尝试调用 docker 命令（纯文件模式/无 docker CLI 的环境）。
 	SkipCLI bool
-	// Timeout 是调用 docker CLI 的超时，默认 3 秒。
+	// Timeout 是 socket 探测与调用 docker CLI 的超时，默认 3 秒。
 	Timeout time.Duration
 }
 
@@ -97,7 +111,8 @@ type Resolver struct {
 	Notes []string
 }
 
-// Resolve 按 flag → daemon.json → docker info → 默认路径 的顺序定位 data-root。
+// Resolve 按 flag → docker socket → daemon.json → docker info → 默认路径
+// 的顺序定位 data-root。
 //
 // 只有「目录真实存在」的候选才会被采纳，否则继续往下试；全部失败则返回错误，
 // 错误信息里带上每一步的原因，避免用户只看到一句没有上下文的 not found。
@@ -123,6 +138,26 @@ func Resolve(o Options) (*Resolver, error) {
 		r.Notes = append(r.Notes, fmt.Sprintf("读取 %s 成功", djPath))
 	}
 
+	// ---- 第二级：问守护进程 ----
+	// socket 可用时这一步最权威：/info 返回的是真正在跑的配置。配置文件里
+	// 写的东西可能被 dockerd 命令行参数或 systemd drop-in 覆盖掉。
+	var sock SocketInfo
+	if o.ProbeInfo != nil {
+		pctx, cancel := context.WithTimeout(context.Background(), timeout)
+		info, err := o.ProbeInfo(pctx)
+		cancel()
+		if err != nil {
+			r.Notes = append(r.Notes, "docker socket 探测跳过："+err.Error())
+		} else {
+			sock = info
+			if s := strings.TrimSpace(info.LogDriver); s != "" {
+				// 运行时的驱动比 daemon.json 里写的可信
+				r.Daemon.LogDriver = s
+			}
+			r.Notes = append(r.Notes, fmt.Sprintf("docker socket 报告 data-root=%s 驱动=%s", info.DataRoot, info.LogDriver))
+		}
+	}
+
 	// ---- 汇总候选 ----
 	type candidate struct {
 		root string
@@ -133,6 +168,10 @@ func Resolve(o Options) (*Resolver, error) {
 	explicit := strings.TrimSpace(o.DataRoot)
 	if explicit != "" {
 		cands = append(cands, candidate{normalizeDataRoot(explicit), SourceFlag})
+	}
+	// socket 的值排在 daemon.json 之前：两者冲突时以运行中的守护进程为准。
+	if s := strings.TrimSpace(sock.DataRoot); s != "" {
+		cands = append(cands, candidate{normalizeDataRoot(s), SourceDockerAPI})
 	}
 	if root, src := r.Daemon.Root(); root != "" {
 		cands = append(cands, candidate{normalizeDataRoot(root), src})

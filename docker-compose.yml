@@ -2,10 +2,13 @@
 #
 # 关键点：宿主机目录必须按它"原本的路径"挂进来，也就是
 #   /app/docker/data  →  /host/app/docker/data
-# 而不是随便挂到 /logs 之类的位置。因为 dlog 探测到的是 daemon.json 里写的
-# 宿主机路径，只有保持路径一致，-host-root /host 才能把它映射对。
+# 而不是随便挂到 /logs 之类的位置。因为 dlog 探测到的是宿主机的 data-root，
+# 只有保持路径一致，-host-root /host 才能把它映射对。
 #
-# 换机器时改这三处：data-root 路径、端口、daemon.json 位置。
+# data-root 的来源按优先级是：-data-root 参数 → docker socket 的 /info →
+# daemon.json → 默认路径。挂了 socket 就不需要再挂 daemon.json。
+#
+# 换机器时改这几处：data-root 路径、端口。
 
 services:
   dlog:
@@ -25,14 +28,15 @@ services:
       #    冒号右边必须和左边保持一致，这是路径映射的前提。
       - /app/docker/data:/host/app/docker/data:ro
 
-      # 2) daemon.json，用来读出 data-root 和默认日志驱动。
-      #    如果宿主机的 /etc/docker/daemon.json 不存在，这行会让 docker 建一个
-      #    同名目录，导致解析失败——那种情况下删掉本行，改用下面的 -data-root 即可。
-      - /etc/docker/daemon.json:/host/etc/docker/daemon.json:ro
-
-      # 3) 日志兜底通道：只有日志驱动不是 json-file/local 的容器才用得上。
-      #    完全不需要的话可以删掉，并给启动参数加上 -no-api。
+      # 2) docker socket。dlog 用 GET /info 问守护进程要 data-root——这是
+      #    最权威的来源（能反映 --data-root 命令行参数、systemd 覆盖等），
+      #    同时负责非 json-file 驱动的日志兜底和 CPU/内存采集。
       - /var/run/docker.sock:/var/run/docker.sock:ro
+
+      # 3) 可选：daemon.json。只有不挂 socket（-no-api 纯文件模式）时才需要。
+      #    注意宿主机没有这个文件时，冒号左边会让 docker 建一个同名**目录**，
+      #    导致解析失败；那种情况请删掉本行、改用 -data-root 直接指定。
+      # - /etc/docker/daemon.json:/host/etc/docker/daemon.json:ro
 
     command:
       - "-listen"
@@ -44,7 +48,7 @@ services:
       # 免得忘了加口令把日志页面裸奔到公网上。
       - "-web-token"
       - "${DLOG_TOKEN:?请先在 .env 里设置 DLOG_TOKEN}"
-      # 探测不到时可以直接写死：
+      # socket 和 daemon.json 都读不到时，最省事的办法是直接写死：
       # - "-data-root"
       # - "/app/docker/data"
 

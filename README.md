@@ -7,7 +7,7 @@
 
 - 零第三方依赖，纯标准库
 - 二进制内嵌前端，单个静态 ELF（`CGO_ENABLED=0`），scp 到服务器就能跑
-- 自动从 `daemon.json` / `docker info` / 默认路径三级定位 data-root
+- 自动从 docker socket / `daemon.json` / `docker info` / 默认路径四级定位 data-root
 - 可选访问口令（`-web-token`），防止把日志页面裸奔在公网上
 - 容器名旁边显示实时 CPU / 内存占用，口径与 `docker stats` 一致
 
@@ -19,17 +19,23 @@ Docker 的 `json-file` 驱动把日志写成：
 <data-root>/containers/<container-id>/<container-id>-json.log
 ```
 
-`<data-root>` 默认是 `/var/lib/docker`，但绝大多数生产环境会在 `/etc/docker/daemon.json` 里改掉，
+`<data-root>` 默认是 `/var/lib/docker`，但绝大多数生产环境会改掉，
 比如本项目作者的环境是 `/app/docker/data`。所以启动时会按下面顺序探测，**取第一个真实存在的目录**：
 
 | 顺序 | 来源 | 说明 |
 |---|---|---|
 | 1 | `-data-root` 参数 | 显式指定，优先级最高；指定了但不存在会直接报错 |
-| 2 | `/etc/docker/daemon.json` 的 `data-root` | 也兼容 Docker 18.03 之前的旧字段 `graph` |
-| 3 | `docker info --format '{{.DockerRootDir}}'` | 权威值，但需要环境里有 docker CLI |
-| 4 | `/var/lib/docker`、snap 路径 | 编译期兜底 |
+| 2 | **docker socket 的 `GET /info`** | 最权威：反映守护进程**实际生效**的配置，包括 `--data-root` 命令行参数、systemd drop-in 覆盖。挂了 socket 就不必再挂 `daemon.json` |
+| 3 | `/etc/docker/daemon.json` 的 `data-root` | 配置文件里的值，也兼容 Docker 18.03 之前的旧字段 `graph` |
+| 4 | `docker info --format '{{.DockerRootDir}}'` | 和顺序 2 同一个值，但需要环境里有 docker CLI（容器镜像里通常没有） |
+| 5 | `/var/lib/docker`、snap 路径 | 编译期兜底 |
 
-探测过程会打在启动日志里，也能通过 `GET /api/meta` 看到。排查"为什么页面是空的"时先看这里。
+> 为什么 socket 排在 daemon.json 前面：配置文件写的不一定是跑起来的配置。有人用
+> `dockerd --data-root=/data/docker` 或 systemd 的 `ExecStart` 覆盖，这时 daemon.json 里可能是空值
+> 或者早已过时。`/info` 返回的是守护进程自己认的那个目录。
+
+探测过程会打在启动日志里，也能通过 `GET /api/meta` 看到（`source` 字段会标明是
+`flag` / `docker-api` / `daemon.json` / `docker-cli` / `default`）。排查"为什么页面是空的"时先看这里。
 
 ### 日志文件格式
 
@@ -71,11 +77,22 @@ Compose 里的挂载有个**必须遵守的规则**：宿主机目录要按它�
 ```yaml
 volumes:
   - /app/docker/data:/host/app/docker/data:ro   # 冒号两边必须一致
+  - /var/run/docker.sock:/var/run/docker.sock:ro
 command: ["-host-root", "/host"]
 ```
 
-因为 dlog 从 `daemon.json` 读到的路径是 `/app/docker/data`（宿主机语义），
-程序内部会拼成 `<host-root>/app/docker/data` 去访问。挂到 `/logs` 之类的地方就会全部落空。
+因为 `/info` 返回的是 `/app/docker/data`（宿主机语义），程序内部会拼成
+`<host-root>/app/docker/data` 去访问。挂到 `/logs` 之类的地方就会全部落空。
+
+**daemon.json 不用挂。** 挂了 socket 就能从 `/info` 拿到 data-root，而且拿到的是
+守护进程实际在用的值。只有在不挂 socket（`-no-api` 纯文件模式）时才需要：
+
+```yaml
+  - /etc/docker/daemon.json:/host/etc/docker/daemon.json:ro   # 可选
+```
+
+注意宿主机没有这个文件时，这行会让 docker 建一个同名**目录**，反而导致解析失败。
+遇到这种情况删掉它，直接用 `-data-root /app/docker/data` 写死最省事。
 
 ## 参数
 
@@ -85,14 +102,14 @@ command: ["-host-root", "/host"]
 | `-web-token` | 空 | 访问口令。留空则不鉴权 |
 | `-data-root` | 自动探测 | 强制指定 Docker 数据根目录 |
 | `-host-root` | 空 | 容器内部署时宿主机根目录的挂载点，如 `/host` |
-| `-daemon-json` | `/etc/docker/daemon.json` | 自定义 daemon.json 路径 |
-| `-docker-sock` | `/var/run/docker.sock` | 兜底通道与资源采集用的 socket |
+| `-daemon-json` | `/etc/docker/daemon.json` | 自定义 daemon.json 路径（没挂 socket 时才用得上） |
+| `-docker-sock` | `/var/run/docker.sock` | data-root 探测、日志兜底、资源采集都用它 |
 | `-tail-max` | `5000` | 单次最多返回多少条历史日志 |
 | `-tail-bytes` | `16777216` | 回溯历史时最多扫描的字节数 |
 | `-poll-ms` | `250` | 日志文件轮询间隔（毫秒） |
 | `-stats-ms` | `2000` | 资源占用采集间隔（毫秒） |
-| `-no-cli` | `false` | 不调用 docker 命令探测 |
-| `-no-api` | `false` | 完全禁用 socket：只读本地文件，也不显示资源占用 |
+| `-no-cli` | `false` | 不调用 docker 命令探测（socket 探测不受影响） |
+| `-no-api` | `false` | 完全禁用 socket：只读本地文件，data-root 只能靠 daemon.json 或参数 |
 | `-no-stats` | `false` | 保留 socket 但只不采集资源占用 |
 
 ### 首屏历史行数
@@ -166,9 +183,9 @@ Cookie 里存的是口令的 SHA-256 派生值而不是口令本身，`HttpOnly`
 |---|---|---|
 | 日志驱动是 `journald` / `syslog` / `fluentd` 等 | 磁盘上没有日志文件 | 需要挂 socket 走 API 兜底，或 `-no-api` 时直接提示不可读 |
 | 容器目录权限不足 | 容器列表为空 | dlog 需以 root 运行（`containers/<id>/` 是 710 且属主 root） |
-| `daemon.json` 里改了 data-root 但目录没挂对 | 列表为空，meta 显示探测失败 | 按上文的路径一致原则重新挂载 |
+| data-root 换了位置但目录没按原路径挂 | 列表为空，meta 显示探测失败 | 按上文的路径一致原则重新挂载，或直接 `-data-root` 写死 |
 | 日志轮转（`max-size` / `max-file`） | 轮转瞬间可能丢几行 | 有意取舍，Dozzle 也一样；要完整归档请用 `docker logs` 导出 |
-| 没挂 docker socket | 不显示 CPU/内存，`journald` 容器不可读 | 需要资源占用就挂 socket；只读文件可加 `-no-api` 彻底断开 |
+| 没挂 docker socket | 不显示 CPU/内存，`journald` 容器不可读，data-root 只能靠 daemon.json 或参数 | 需要资源占用就挂 socket；只读文件可加 `-no-api` 彻底断开 |
 
 ## 目录结构
 

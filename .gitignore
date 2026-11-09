@@ -1,6 +1,8 @@
 dist/
-dlog
-dlog.exe
+# 只忽略仓库根目录的二进制产物。写裸 "dlog" 会连 cmd/dlog/ 一起忽略掉——
+# 踩过这个坑：整个 main 包都没进仓库，clone 下来编译不过。
+/dlog
+/dlog.exe
 *.log
 .DS_Store
 
