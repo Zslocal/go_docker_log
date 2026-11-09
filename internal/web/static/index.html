@@ -1,0 +1,808 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>dlog · Docker 日志</title>
+<style>
+:root{
+  --bg:#0a0e13; --panel:#101720; --panel2:#16202b;
+  --line:#1f2c38; --fg:#ccd8e4; --dim:#6f8194;
+  --accent:#4c9aff; --ok:#3fb950; --warn:#d6a13a; --err:#f0645c;
+  --mono:ui-monospace,SFMono-Regular,Menlo,Consolas,"Liberation Mono",monospace;
+}
+*{box-sizing:border-box}
+html,body{height:100%;margin:0}
+body{
+  background:var(--bg);color:var(--fg);overflow:hidden;
+  font:13px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif;
+  -webkit-font-smoothing:antialiased;
+}
+button{font:inherit;cursor:pointer;border-radius:6px}
+::-webkit-scrollbar{width:10px;height:10px}
+::-webkit-scrollbar-thumb{background:#1e2b38;border-radius:5px;border:2px solid var(--panel)}
+::-webkit-scrollbar-thumb:hover{background:#2a3b4c}
+::-webkit-scrollbar-track{background:transparent}
+
+.app{display:grid;grid-template-columns:272px 1fr;height:100vh}
+
+/* ---------- 侧边栏 ---------- */
+.side{display:flex;flex-direction:column;min-height:0;background:var(--panel);border-right:1px solid var(--line)}
+.brand{padding:14px 16px 11px;border-bottom:1px solid var(--line)}
+.logo{font-size:15px;font-weight:650;letter-spacing:.4px}
+.logo i{color:var(--accent);font-style:normal}
+.meta{margin-top:5px;font-size:10.5px;color:var(--dim);font-family:var(--mono);word-break:break-all;line-height:1.45}
+.search{padding:9px 12px;border-bottom:1px solid var(--line)}
+.search input{
+  width:100%;background:var(--panel2);border:1px solid var(--line);border-radius:6px;
+  padding:6px 9px;color:var(--fg);font-size:12px;outline:none;
+}
+.search input:focus{border-color:var(--accent)}
+.search input::placeholder{color:#4d5f70}
+.clist{flex:1;overflow-y:auto;padding:6px}
+.citem{display:flex;gap:8px;align-items:flex-start;padding:7px 9px;border-radius:6px;cursor:pointer;border:1px solid transparent;margin-bottom:1px}
+.citem:hover{background:var(--panel2)}
+.citem.on{background:#132538;border-color:#22405e}
+.citem .body{min-width:0;flex:1}
+.citem .n{font-size:12.5px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.citem .sub{font-size:10.5px;color:var(--dim);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;margin-top:1px;font-family:var(--mono)}
+.dot{width:7px;height:7px;border-radius:50%;flex:0 0 auto;margin-top:6px;background:#465a6b}
+.dot.run{background:var(--ok);box-shadow:0 0 0 3px rgba(63,185,80,.14)}
+.dot.pause{background:var(--warn)}
+.sidefoot{padding:8px 14px;border-top:1px solid var(--line);font-size:10.5px;color:var(--dim);font-family:var(--mono)}
+.sidefoot b{color:#8fa3b5;font-weight:500}
+
+/* ---------- 主区 ---------- */
+.main{display:flex;flex-direction:column;min-width:0;min-height:0;position:relative}
+.topbar{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:10px 16px;border-bottom:1px solid var(--line);background:var(--panel)}
+.tinfo{display:flex;align-items:center;gap:9px;min-width:0}
+.cname{font-weight:600;font-size:13.5px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.badge{font-size:10.5px;color:var(--dim);border:1px solid var(--line);border-radius:4px;padding:1px 6px;font-family:var(--mono);white-space:nowrap}
+.badge.live{color:var(--ok);border-color:rgba(63,185,80,.35)}
+.badge.wait{color:var(--warn);border-color:rgba(214,161,58,.35)}
+.badge.dead{color:var(--err);border-color:rgba(240,100,92,.35)}
+
+/* 暂停跟随时的小提示，点一下回到最新 */
+.pauseflag{
+  font-size:10.5px;color:var(--warn);border:1px solid rgba(214,161,58,.35);
+  background:rgba(214,161,58,.08);border-radius:4px;padding:1px 7px;cursor:pointer;
+  white-space:nowrap;flex:0 0 auto;
+}
+.pauseflag:hover{background:rgba(214,161,58,.16)}
+
+/* 资源占用：模仿 docker stats 的两列指标，底部细线表示占比 */
+.chips{display:flex;gap:7px;align-items:center;margin-left:4px;flex:0 0 auto}
+.chip{
+  position:relative;display:flex;align-items:center;gap:5px;overflow:hidden;
+  font-family:var(--mono);font-size:11px;line-height:1;background:#131c24;
+  border:1px solid var(--line);border-radius:5px;padding:4px 8px 5px;white-space:nowrap;
+}
+.chip em{font-style:normal;color:#5c7185;font-size:9.5px;letter-spacing:.4px}
+.chip b{color:#c9d6e2;font-weight:500}
+.chip u{text-decoration:none;color:#5c7185;font-size:10px}
+.chip .meter{position:absolute;left:0;right:0;bottom:0;height:2px;background:#1b2836}
+.chip .meter>span{display:block;height:100%;width:0;background:var(--accent);transition:width .45s ease}
+.chip.mem .meter>span{background:#2fb37e}
+.chip.hot b{color:#ff8a80}
+.chip.hot .meter>span{background:var(--err)}
+.tactions{display:flex;gap:7px;flex:0 0 auto}
+.ghost{background:var(--panel2);border:1px solid var(--line);color:var(--fg);padding:5px 11px;font-size:12px}
+.ghost:hover:not(:disabled){border-color:#2c4256;background:#1a2734}
+.ghost:disabled{opacity:.35;cursor:not-allowed}
+
+.toolbar{display:flex;align-items:center;gap:11px;padding:8px 16px;border-bottom:1px solid var(--line);background:var(--panel);flex-wrap:wrap}
+.kw{flex:1 1 220px;min-width:150px;background:var(--bg);border:1px solid var(--line);border-radius:6px;padding:5px 10px;color:var(--fg);font-size:12px;outline:none}
+.kw:focus{border-color:var(--accent)}
+.kw::placeholder{color:#4d5f70}
+.levels{display:flex;gap:2px;background:var(--bg);border:1px solid var(--line);border-radius:6px;padding:2px}
+.lv{background:none;border:none;color:var(--dim);font-size:11.5px;padding:3px 9px;border-radius:4px}
+.lv:hover{color:var(--fg)}
+.lv.active{background:var(--panel2);color:var(--fg)}
+.lv[data-lv="err"].active{color:var(--err)}
+.lv[data-lv="warn"].active{color:var(--warn)}
+.switch{display:flex;align-items:center;gap:5px;font-size:11.5px;color:var(--dim);cursor:pointer;user-select:none}
+.switch input{accent-color:var(--accent);margin:0;cursor:pointer}
+.count{font-size:11px;color:var(--dim);font-family:var(--mono);margin-left:auto;white-space:nowrap}
+.hsize{background:var(--bg);border:1px solid var(--line);border-radius:6px;padding:4px 6px;color:var(--fg);font-size:11.5px;font-family:var(--mono);outline:none;cursor:pointer}
+.hsize:focus{border-color:var(--accent)}
+.hsize option{background:var(--panel);color:var(--fg)}
+
+/* ---------- 日志窗 ---------- */
+.viewer{
+  flex:1;overflow-y:auto;overflow-x:hidden;background:var(--bg);position:relative;
+  font-family:var(--mono);font-size:12.5px;line-height:1.55;padding:6px 0 28px;
+}
+.empty{position:absolute;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:6px;pointer-events:none}
+.empty .t{font-size:13px;color:#8b9aa9;font-family:inherit}
+.empty .s{font-size:11.5px;color:#4d5f70;font-family:inherit}
+.viewer.has-data .empty{display:none}
+
+.line{display:flex;gap:9px;padding:0 16px;border-left:2px solid transparent}
+.line:hover{background:#0f1620}
+.line .ts{flex:0 0 92px;color:#4d5f70;font-size:11px;padding-top:2px;font-variant-numeric:tabular-nums}
+.line .st{flex:0 0 auto;font-size:9.5px;letter-spacing:.3px;padding:0 4px;border-radius:3px;height:15px;line-height:15px;margin-top:2px;text-align:center;min-width:28px}
+.st.out{color:#5f7d99;background:rgba(95,125,153,.13)}
+.st.err{color:#e06c75;background:rgba(224,108,117,.15)}
+.st.raw{color:#8a7d55;background:rgba(138,125,85,.15)}
+.line .msg{flex:1;min-width:0;white-space:pre-wrap;word-break:break-word}
+.line.lv-err{border-left-color:rgba(240,100,92,.55);background:rgba(240,100,92,.045)}
+.line.lv-err .msg{color:#ff9b95}
+.line.lv-warn{border-left-color:rgba(214,161,58,.45)}
+.line.lv-warn .msg{color:#e8c076}
+.line.lv-debug .msg{color:#7c8b9b}
+mark{background:rgba(76,154,255,.3);color:inherit;border-radius:2px;padding:0 1px}
+
+.jump{
+  position:absolute;right:26px;bottom:22px;background:var(--accent);color:#04101f;border:none;
+  padding:7px 15px;font-size:12px;font-weight:650;border-radius:20px;
+  box-shadow:0 6px 18px rgba(0,0,0,.5);
+}
+.toast{
+  position:fixed;left:50%;bottom:26px;transform:translateX(-50%);
+  background:#1c2a38;border:1px solid #2c4256;color:var(--fg);
+  padding:9px 16px;border-radius:8px;font-size:12.5px;box-shadow:0 8px 24px rgba(0,0,0,.5);
+  opacity:0;transition:opacity .18s;pointer-events:none;max-width:70vw;
+}
+.toast.on{opacity:1}
+</style>
+</head>
+<body>
+<div class="app">
+  <aside class="side">
+    <div class="brand">
+      <div class="logo">d<i>log</i></div>
+      <div class="meta" id="meta">正在探测 Docker 数据目录…</div>
+    </div>
+    <div class="search"><input id="csearch" placeholder="筛选容器…" autocomplete="off"></div>
+    <div class="clist" id="clist"></div>
+    <div class="sidefoot" id="sidefoot"></div>
+  </aside>
+
+  <main class="main">
+    <header class="topbar">
+      <div class="tinfo">
+        <span class="dot" id="stateDot"></span>
+        <span class="cname" id="cname">未选择容器</span>
+        <span class="badge" id="cbadge" hidden></span>
+        <span class="pauseflag" id="pauseflag" hidden title="点击回到最新"></span>
+        <span class="chips" id="chips"></span>
+      </div>
+      <div class="tactions">
+        <button class="ghost" id="btnReload">刷新</button>
+        <button class="ghost" id="btnDownload" disabled>下载</button>
+        <button class="ghost" id="btnClear">清空</button>
+      </div>
+    </header>
+
+    <div class="toolbar">
+      <input id="kw" class="kw" placeholder="过滤关键字，多个用空格分隔" autocomplete="off">
+      <div class="levels" id="levels">
+        <button class="lv active" data-lv="all">全部</button>
+        <button class="lv" data-lv="err">错误</button>
+        <button class="lv" data-lv="warn">警告</button>
+        <button class="lv" data-lv="info">信息</button>
+        <button class="lv" data-lv="debug">调试</button>
+      </div>
+      <label class="switch"><input type="checkbox" id="autoScroll" checked><span>自动滚动</span></label>
+      <label class="switch" title="进入容器时向上回溯多少行历史日志">历史
+        <select class="hsize" id="hsize"></select>
+      </label>
+      <span class="count" id="count">0 行</span>
+    </div>
+
+    <div class="viewer" id="viewer">
+      <div class="empty">
+        <div class="t">从左侧选择一个容器</div>
+        <div class="s">直接读取本地 json-file 日志，不经过 docker 守护进程</div>
+      </div>
+    </div>
+    <button class="jump" id="jump" hidden>↓ 有新日志</button>
+  </main>
+</div>
+<div class="toast" id="toast"></div>
+
+<script>
+(function () {
+  'use strict';
+
+  var $ = function (id) { return document.getElementById(id); };
+  var viewer = $('viewer'), clist = $('clist'), jump = $('jump');
+
+  var RANK = { debug: 0, info: 1, warn: 2, err: 3 };
+  // BASE_MAX 是 DOM 里最多保留的行数下限；选了比它更大的历史行数时，
+  // 上限会跟着抬高（见 maxLines），否则刚加载的旧日志会被立刻裁掉。
+  var BASE_MAX = 3000;
+  var HSIZE_LIST = [200, 400, 1000, 2000, 5000];
+  var HSIZE_KEY = 'dlog.hsize';
+
+  var S = {
+    containers: [],
+    current: null,
+    es: null,
+    entries: [],
+    minLevel: 'all',
+    kws: [],
+    autoScroll: true,
+    cfilter: '',
+    failCount: 0,
+    pendingNew: 0,
+    statsOK: false,
+    statsTimer: null,
+    hsize: 400
+  };
+
+  function maxLines() { return Math.max(BASE_MAX, S.hsize); }
+
+  // ---------------- 工具 ----------------
+
+  function esc(s) {
+    return String(s).replace(/[&<>"']/g, function (c) {
+      return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c];
+    });
+  }
+
+  function escRe(s) { return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'); }
+
+  function pad(n, w) { return String(n).padStart(w || 2, '0'); }
+
+  function fmtTs(ns) {
+    if (!ns) return '--:--:--.---';
+    var d = new Date(ns / 1e6);
+    return pad(d.getHours()) + ':' + pad(d.getMinutes()) + ':' + pad(d.getSeconds()) + '.' + pad(d.getMilliseconds(), 3);
+  }
+
+  function fmtSize(n) {
+    if (!n) return '0B';
+    var u = ['B', 'KB', 'MB', 'GB', 'TB'], i = 0, v = n;
+    while (v >= 1024 && i < u.length - 1) { v /= 1024; i++; }
+    return (i === 0 ? v : v.toFixed(v < 10 ? 1 : 0)) + u[i];
+  }
+
+  // 内存用二进制单位，跟 docker stats 的 MiB/GiB 对齐
+  function fmtMem(n) {
+    if (!n) return '0B';
+    var u = ['B', 'KiB', 'MiB', 'GiB', 'TiB'], i = 0, v = n;
+    while (v >= 1024 && i < u.length - 1) { v /= 1024; i++; }
+    return (i === 0 ? v : v.toFixed(v < 10 ? 1 : 0)) + u[i];
+  }
+
+  function cpuText(v) {
+    if (!v || v < 0.005) return '0%';
+    return (v < 10 ? v.toFixed(2) : v.toFixed(1)) + '%';
+  }
+
+  // 生成一枚指标芯片；pct 只影响底部那条细线和超限变红
+  function chip(kind, label, value, suffix, pct) {
+    var w = Math.max(0, Math.min(100, pct || 0));
+    var cls = pct >= 80 ? ' hot' : '';
+    return '<span class="chip ' + kind + cls + '">' +
+      '<em>' + label + '</em>' +
+      '<b>' + value + '</b>' +
+      (suffix ? '<u>' + suffix + '</u>' : '') +
+      '<span class="meter"><span style="width:' + w.toFixed(1) + '%"></span></span>' +
+      '</span>';
+  }
+
+  var RE_ERR = /\b(fatal|panic|error|err|exception|failed|failure|fail)\b/i;
+  var RE_WARN = /\b(warn|warning)\b/i;
+  var RE_DEBUG = /\b(debug|trace|verbose)\b/i;
+
+  function detectLv(log) {
+    if (RE_ERR.test(log)) return 'err';
+    if (RE_WARN.test(log)) return 'warn';
+    if (RE_DEBUG.test(log)) return 'debug';
+    return 'info';
+  }
+
+  var toastTimer = null;
+  function toast(msg) {
+    var el = $('toast');
+    el.textContent = msg;
+    el.classList.add('on');
+    clearTimeout(toastTimer);
+    toastTimer = setTimeout(function () { el.classList.remove('on'); }, 3200);
+  }
+
+  // ---------------- 过滤 ----------------
+
+  function match(e) {
+    if (S.minLevel !== 'all' && RANK[e.lv] < RANK[S.minLevel]) return false;
+    if (S.kws.length) {
+      var low = e.log.toLowerCase();
+      for (var i = 0; i < S.kws.length; i++) {
+        if (low.indexOf(S.kws[i]) === -1) return false;
+      }
+    }
+    return true;
+  }
+
+  function highlight(text) {
+    var out = esc(text);
+    if (!S.kws.length) return out;
+    var re = new RegExp('(' + S.kws.map(escRe).join('|') + ')', 'gi');
+    return out.replace(re, '<mark>$1</mark>');
+  }
+
+  // ---------------- 渲染 ----------------
+
+  function buildLine(e) {
+    var d = document.createElement('div');
+    d.className = 'line lv-' + e.lv;
+
+    var ts = document.createElement('span');
+    ts.className = 'ts';
+    ts.textContent = fmtTs(e.ts);
+
+    var st = document.createElement('span');
+    st.className = 'st ' + (e.stream === 'stderr' ? 'err' : e.stream === 'raw' ? 'raw' : 'out');
+    st.textContent = e.stream === 'stderr' ? 'ERR' : e.stream === 'raw' ? 'TXT' : 'OUT';
+
+    var msg = document.createElement('span');
+    msg.className = 'msg';
+    var body = e.log;
+    if (body.charCodeAt(body.length - 1) === 10) body = body.slice(0, -1);
+    if (S.kws.length) msg.innerHTML = highlight(body);
+    else msg.textContent = body;
+
+    d.appendChild(ts); d.appendChild(st); d.appendChild(msg);
+    return d;
+  }
+
+  function rerender() {
+    viewer.classList.add('has-data');
+    viewer.innerHTML = '';
+    var frag = document.createDocumentFragment();
+    for (var i = 0; i < S.entries.length; i++) {
+      var e = S.entries[i];
+      if (!match(e)) { e.el = null; continue; }
+      if (!e.el) e.el = buildLine(e);
+      frag.appendChild(e.el);
+    }
+    viewer.appendChild(frag);
+    if (S.autoScroll) viewer.scrollTop = viewer.scrollHeight;
+    updateCount();
+  }
+
+  function updateCount() {
+    var shown = 0;
+    for (var i = 0; i < S.entries.length; i++) if (match(S.entries[i])) shown++;
+    $('count').textContent = shown + ' / ' + S.entries.length + ' 行';
+  }
+
+  var scrollQueued = false;
+  function scheduleScroll() {
+    if (scrollQueued) return;
+    scrollQueued = true;
+    requestAnimationFrame(function () {
+      scrollQueued = false;
+      if (S.autoScroll) {
+        viewer.scrollTop = viewer.scrollHeight;
+        lastTop = viewer.scrollTop;
+      }
+    });
+  }
+
+  // ---------------- 跟随控制 ----------------
+  // 判断"是否退出跟随"只看滚动**方向**，不看位置：
+  // 程序自动滚到底时 scrollTop 只增不减，用户往上滚才会减小，靠方向就能区分开。
+  // 之前那版用"是否在底部"做判断，一旦布局有半像素误差就会误判成"用户滚走了"，
+  // 然后就再也不自动滚了——这正是它不好用的原因。
+  var lastTop = 0;
+
+  function nearBottom() {
+    return viewer.scrollHeight - viewer.scrollTop - viewer.clientHeight <= 24;
+  }
+
+  function pauseFollow() {
+    if (!S.autoScroll) return;
+    S.autoScroll = false;
+    var cb = $('autoScroll');
+    if (cb) cb.checked = false;
+    updateFollowUI();
+  }
+
+  function resumeFollow(force) {
+    var was = S.autoScroll;
+    S.autoScroll = true;
+    var cb = $('autoScroll');
+    if (cb) cb.checked = true;
+    S.pendingNew = 0;
+    updateFollowUI();
+
+    if (force || !was) {
+      viewer.scrollTop = viewer.scrollHeight;
+      lastTop = viewer.scrollTop;
+    }
+  }
+
+  function updateFollowUI() {
+    var flag = $('pauseflag');
+    if (S.autoScroll) {
+      flag.hidden = true;
+    } else {
+      flag.hidden = false;
+      flag.textContent = S.pendingNew > 0 ? '已暂停 · ' + S.pendingNew + ' 条新日志' : '已暂停跟随';
+    }
+
+    if (S.autoScroll || S.pendingNew === 0) {
+      jump.hidden = true;
+    } else {
+      jump.hidden = false;
+      jump.textContent = '↓ ' + S.pendingNew + ' 条新日志';
+    }
+  }
+
+  function trim() {
+    var over = S.entries.length - maxLines();
+    if (over <= 0) return;
+
+    // 暂停跟随时删掉头部行会让内容整体上移，这里把位移补回去，
+    // 否则用户正盯着某一行，画面会突然"跳"一下。
+    var before = S.autoScroll ? 0 : viewer.scrollHeight;
+
+    var removed = S.entries.splice(0, over);
+    for (var i = 0; i < removed.length; i++) {
+      var el = removed[i].el;
+      if (el && el.parentNode) el.parentNode.removeChild(el);
+    }
+
+    if (before) {
+      var delta = before - viewer.scrollHeight;
+      if (delta > 0) {
+        viewer.scrollTop -= delta;
+        lastTop = viewer.scrollTop;
+      }
+    }
+  }
+
+  function addEntry(raw) {
+    var log = raw.log || '';
+    var e = {
+      ts: raw.ts || 0,
+      stream: raw.stream || 'stdout',
+      log: log,
+      lv: detectLv(log),
+      el: null
+    };
+    S.entries.push(e);
+    trim();
+
+    if (match(e)) {
+      e.el = buildLine(e);
+      viewer.appendChild(e.el);
+      if (S.autoScroll) {
+        scheduleScroll();
+      } else {
+        S.pendingNew++;
+        updateFollowUI();
+      }
+    }
+    updateCount();
+  }
+
+  // ---------------- 容器列表 ----------------
+
+  function renderClist() {
+    clist.innerHTML = '';
+    var kw = S.cfilter.toLowerCase();
+    var shown = 0, frag = document.createDocumentFragment();
+
+    for (var i = 0; i < S.containers.length; i++) {
+      var c = S.containers[i];
+      if (kw && (c.name + ' ' + c.image).toLowerCase().indexOf(kw) === -1) continue;
+      shown++;
+
+      var item = document.createElement('div');
+      item.className = 'citem' + (S.current && S.current.id === c.id ? ' on' : '');
+      item.title = c.name + '\n' + c.image + '\n' + (c.logDriver || 'json-file') +
+                   (c.hasLogFile ? '' : '（日志不在本地文件）');
+
+      var dot = document.createElement('span');
+      dot.className = 'dot' + (c.running ? ' run' : (c.state === 'paused' || c.state === 'restarting' ? ' pause' : ''));
+
+      var body = document.createElement('div');
+      body.className = 'body';
+
+      var n = document.createElement('div');
+      n.className = 'n';
+      n.textContent = c.name;
+
+      var sub = document.createElement('div');
+      sub.className = 'sub';
+      sub.textContent = c.image + ' · ' + (c.hasLogFile ? fmtSize(c.logSize) : '需 API');
+
+      body.appendChild(n); body.appendChild(sub);
+      item.appendChild(dot); item.appendChild(body);
+      item.addEventListener('click', function (cc) {
+        return function () { select(cc); };
+      }(c));
+      frag.appendChild(item);
+    }
+
+    clist.appendChild(frag);
+    $('sidefoot').innerHTML = '共 <b>' + S.containers.length + '</b> 个容器，显示 <b>' + shown + '</b>';
+  }
+
+  async function loadContainers() {
+    try {
+      var res = await fetch('/api/containers');
+      if (res.status === 401) { location.reload(); return []; }
+      var data = await res.json();
+      if (data.error) throw new Error(data.error);
+      S.containers = data.containers || [];
+      renderClist();
+      return S.containers;
+    } catch (err) {
+      clist.innerHTML = '<div style="padding:12px;color:#f0645c;font-size:12px">' + esc(err.message) + '</div>';
+      return [];
+    }
+  }
+
+  // ---------------- 历史行数 ----------------
+  // 服务端的 -tail-max 是硬上限，超出的请求会被静默夹紧，
+  // 所以下拉框只列出 cap 以内的选项，免用户选了却不生效。
+
+  function savedHSize() {
+    try {
+      var v = parseInt(localStorage.getItem(HSIZE_KEY), 10);
+      if (v > 0) return v;
+    } catch (e) { /* 隐私模式下 localStorage 可能不可用 */ }
+    return 400;
+  }
+
+  function renderHSize(cap) {
+    if (!cap || cap <= 0) cap = HSIZE_LIST[HSIZE_LIST.length - 1];
+
+    var list = HSIZE_LIST.filter(function (n) { return n <= cap; });
+    if (!list.length) list.push(cap);
+    else if (list[list.length - 1] !== cap) list.push(cap);
+
+    // 落到不超过期望值的最大档位，保证 select 一定有对应 option 被选中
+    var want = Math.min(S.hsize || savedHSize(), cap);
+    var pick = list[0];
+    for (var i = 0; i < list.length; i++) if (list[i] <= want) pick = list[i];
+    S.hsize = pick;
+
+    var sel = $('hsize');
+    sel.innerHTML = '';
+    for (var j = 0; j < list.length; j++) {
+      var o = document.createElement('option');
+      o.value = String(list[j]);
+      o.textContent = list[j] + ' 行';
+      if (list[j] === pick) o.selected = true;
+      sel.appendChild(o);
+    }
+    sel.title = '最多可回溯 ' + cap + ' 行';
+  }
+
+  async function loadMeta() {
+    try {
+      var res = await fetch('/api/meta');
+      if (res.status === 401) { location.reload(); return; }
+      var m = await res.json();
+      var txt = esc(m.dataRoot);
+      if (m.hostRoot) txt = esc(m.hostRoot) + ' → ' + txt;
+      $('meta').innerHTML = txt + '<br>驱动 ' + esc(m.defaultDriver) + ' · 来源 ' + esc(m.source);
+
+      var notes = (m.notes || []).slice();
+      if (m.authEnabled) notes.push('已启用访问口令');
+      if (!m.statsAvailable) notes.push('未启用资源占用采集：需要 docker socket');
+      $('meta').title = notes.join('\n');
+
+      S.statsOK = !!m.statsAvailable;
+      if (S.statsOK) startStats();
+
+      if (m.tailMax) renderHSize(m.tailMax);
+    } catch (e) { /* 元信息失败不影响主要功能 */ }
+  }
+
+  // ---------------- 资源占用 ----------------
+
+  function startStats() {
+    if (S.statsTimer) return;
+    pollStats();
+    S.statsTimer = setInterval(pollStats, 3000);
+  }
+
+  async function pollStats() {
+    if (!S.statsOK || !S.current) return;
+
+    var data;
+    try {
+      var res = await fetch('/api/stats');
+      if (res.status === 401) { location.reload(); return; }
+      data = await res.json();
+    } catch (e) { return; }
+
+    if (!data.available) { renderStats(null); return; }
+    renderStats((data.stats || {})[S.current.id]);
+  }
+
+  function renderStats(st) {
+    var box = $('chips');
+    if (!st) { box.innerHTML = ''; box.title = ''; return; }
+    if (st.err) { box.innerHTML = ''; box.title = '资源采集失败：' + st.err; return; }
+
+    box.title =
+      '网络 ' + fmtMem(st.netRx) + ' ↓ / ' + fmtMem(st.netTx) + ' ↑\n' +
+      '块 IO ' + fmtMem(st.blockRead) + ' 读 / ' + fmtMem(st.blockWrite) + ' 写\n' +
+      '进程数 ' + (st.pids || 0);
+
+    box.innerHTML =
+      chip('cpu', 'CPU', cpuText(st.cpu), '', st.cpu) +
+      chip('mem', '内存', fmtMem(st.memUsed), ' / ' + fmtMem(st.memLimit), st.memPct);
+  }
+
+  // ---------------- 连接 ----------------
+
+  function setConn(state, text) {
+    var b = $('cbadge');
+    b.hidden = false;
+    b.className = 'badge ' + state;
+    b.textContent = text;
+  }
+
+  // force 用于"同一个容器但要重新拉历史"的场景（比如切换历史行数），
+  // 否则重复点同一个容器会被去重挡掉。
+  function select(c, force) {
+    if (!force && S.current && S.current.id === c.id) return;
+    S.current = c;
+    S.failCount = 0;
+
+    if (S.es) { S.es.close(); S.es = null; }
+
+    S.entries = [];
+    S.pendingNew = 0;
+    S.autoScroll = true;
+    $('autoScroll').checked = true;
+    viewer.innerHTML = '';
+    viewer.classList.add('has-data');
+    viewer.scrollTop = 0;
+    lastTop = 0;
+    jump.hidden = true;
+    $('pauseflag').hidden = true;
+    $('chips').innerHTML = '';
+
+    $('cname').textContent = c.name;
+    $('btnDownload').disabled = !c.hasLogFile;
+    $('stateDot').className = 'dot' + (c.running ? ' run' : '');
+    setConn('wait', '连接中');
+    renderClist();
+    updateCount();
+    pollStats();
+
+    var url = '/api/stream?container=' + encodeURIComponent(c.id) + '&tail=' + S.hsize;
+    var es = new EventSource(url);
+    S.es = es;
+
+    es.addEventListener('log', function (ev) {
+      try { addEntry(JSON.parse(ev.data)); } catch (e) { /* 忽略坏帧 */ }
+    });
+
+    es.addEventListener('error', function (ev) {
+      // 服务端主动推的 event: error 会带 data，连接层的错误没有
+      if (ev.data) {
+        try {
+          var m = JSON.parse(ev.data);
+          if (m && m.message) setConn('dead', m.message);
+        } catch (e) { /* ignore */ }
+        return;
+      }
+      S.failCount++;
+      if (es.readyState === EventSource.CLOSED || S.failCount > 6) {
+        // 401（口令过期）也会走到这里，提示刷新即可重新进入登录页
+        setConn('dead', '连接失败，请刷新页面');
+        es.close();
+      } else {
+        setConn('wait', '重连中…');
+      }
+    });
+
+    es.onopen = function () {
+      S.failCount = 0;
+      setConn('live', '实时');
+    };
+  }
+
+  // ---------------- 事件绑定 ----------------
+
+  $('csearch').addEventListener('input', function (e) {
+    S.cfilter = e.target.value.trim();
+    renderClist();
+  });
+
+  var kwTimer = null;
+  $('kw').addEventListener('input', function (e) {
+    clearTimeout(kwTimer);
+    var v = e.target.value.trim().toLowerCase();
+    kwTimer = setTimeout(function () {
+      S.kws = v ? v.split(/\s+/).filter(Boolean) : [];
+      rerender();
+    }, 180);
+  });
+
+  $('levels').addEventListener('click', function (e) {
+    var btn = e.target.closest('.lv');
+    if (!btn) return;
+    var all = $('levels').querySelectorAll('.lv');
+    for (var i = 0; i < all.length; i++) all[i].classList.remove('active');
+    btn.classList.add('active');
+    S.minLevel = btn.dataset.lv;
+    rerender();
+  });
+
+  $('autoScroll').addEventListener('change', function (e) {
+    if (e.target.checked) resumeFollow(true);
+    else pauseFollow();
+  });
+
+  jump.addEventListener('click', function () { resumeFollow(true); });
+  $('pauseflag').addEventListener('click', function () { resumeFollow(true); });
+
+  // 往上滚 → 退出实时跟随；滚回最后一行 → 自动恢复
+  viewer.addEventListener('scroll', function () {
+    var top = viewer.scrollTop;
+    var goingUp = top < lastTop;
+    lastTop = top;
+
+    if (nearBottom()) {
+      if (!S.autoScroll) resumeFollow(false);
+      return;
+    }
+    if (goingUp && S.autoScroll) pauseFollow();
+  }, { passive: true });
+
+  $('btnClear').addEventListener('click', function () {
+    S.entries = [];
+    viewer.innerHTML = '';
+    viewer.classList.add('has-data');
+    jump.hidden = true;
+    updateCount();
+  });
+
+  $('btnDownload').addEventListener('click', function () {
+    if (!S.current) return;
+    window.location.href = '/api/download?container=' + encodeURIComponent(S.current.id);
+  });
+
+  $('btnReload').addEventListener('click', async function () {
+    var list = await loadContainers();
+    if (S.current) {
+      var still = list.filter(function (x) { return x.id === S.current.id; })[0];
+      if (still) { S.current = still; $('stateDot').className = 'dot' + (still.running ? ' run' : ''); }
+    }
+    toast('已刷新');
+  });
+
+  $('hsize').addEventListener('change', function (e) {
+    var v = parseInt(e.target.value, 10);
+    if (!v || v <= 0) return;
+    S.hsize = v;
+    try { localStorage.setItem(HSIZE_KEY, String(v)); } catch (err) { /* 忽略 */ }
+    if (S.current) {
+      select(S.current, true);
+      toast('已按最近 ' + v + ' 行重新加载');
+    }
+  });
+
+  // ---------------- 启动 ----------------
+
+  // 先用本地记住的档位渲染一遍，避免首屏按默认值请求；
+  // meta 返回后再用服务端 tail-max 校正可选项。
+  S.hsize = savedHSize();
+  renderHSize(0);
+
+  loadMeta().then(function () {
+    loadContainers().then(function (list) {
+      if (!list.length) return;
+      var running = list.filter(function (c) { return c.running; })[0];
+      select(running || list[0]);
+    });
+  });
+
+  // 每 30 秒刷新一次容器列表，容器上下线能自动反映
+  setInterval(loadContainers, 30000);
+})();
+</script>
+</body>
+</html>

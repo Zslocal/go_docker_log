@@ -1,0 +1,7 @@
+dist/
+.git/
+.gitignore
+*.md
+README.md
+build.sh
+docker-compose.yml

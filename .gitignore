@@ -1,0 +1,11 @@
+dist/
+dlog
+dlog.exe
+*.log
+.DS_Store
+
+# 访问口令不该进仓库
+.env
+
+# 本地工作区数据（会话记忆、临时文件）
+.workbuddy/
