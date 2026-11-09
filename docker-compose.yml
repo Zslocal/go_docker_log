@@ -25,18 +25,25 @@ services:
 
     volumes:
       # 1) Docker 数据目录（只读）。日志就在 <data-root>/containers/<id>/ 下。
-      #    冒号右边必须和左边保持一致，这是路径映射的前提。
-      - /app/docker/data:/host/app/docker/data:ro
+      #
+      #    这里不再写死路径，只用一个变量 DLOG_DATA_ROOT 表达宿主机上的
+      #    data-root，冒号右边由它自动拼成 /host + 同一路径。只改一处，
+      #    两边就不可能不一致——这是最常见的踩坑点（挂到 /logs 之类的位置）。
+      #
+      #    不知道填什么？先用默认值启动。dlog 会通过 socket 问守护进程要
+      #    真实路径，如果这里对不上，页面顶部会直接告诉你该改成哪一行。
+      - ${DLOG_DATA_ROOT:-/var/lib/docker}:/host${DLOG_DATA_ROOT:-/var/lib/docker}:ro
 
       # 2) docker socket。dlog 用 GET /info 问守护进程要 data-root——这是
-      #    最权威的来源（能反映 --data-root 命令行参数、systemd 覆盖等），
-      #    同时负责非 json-file 驱动的日志兜底和 CPU/内存采集。
+      #    最权威的来源（能反映 --data-root 命令行参数、systemd 覆盖等，
+      #    这些都不会写进 daemon.json），同时负责非 json-file 驱动的日志
+      #    兜底和 CPU/内存采集。
       - /var/run/docker.sock:/var/run/docker.sock:ro
 
-      # 3) 可选：daemon.json。只有不挂 socket（-no-api 纯文件模式）时才需要。
-      #    注意宿主机没有这个文件时，冒号左边会让 docker 建一个同名**目录**，
-      #    导致解析失败；那种情况请删掉本行、改用 -data-root 直接指定。
-      # - /etc/docker/daemon.json:/host/etc/docker/daemon.json:ro
+      # 3) daemon.json 不需要挂。socket 的 /info 已经包含 DockerRootDir 和
+      #    LoggingDriver，比读配置文件更准（配置文件里写的可能没生效）。
+      #    只有禁用 socket（-no-api）的纯文件模式才需要它，那时再手动加：
+      #      - /etc/docker/daemon.json:/host/etc/docker/daemon.json:ro
 
     command:
       - "-listen"

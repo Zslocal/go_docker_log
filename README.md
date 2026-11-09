@@ -8,6 +8,7 @@
 - 零第三方依赖，纯标准库
 - 二进制内嵌前端，单个静态 ELF（`CGO_ENABLED=0`），scp 到服务器就能跑
 - 自动从 docker socket / `daemon.json` / `docker info` / 默认路径四级定位 data-root
+- **挂载配错不用猜**：从 socket 问出宿主机真实路径，读不到就把该加的 `volumes` 行直接打印在日志和页面上
 - 可选访问口令（`-web-token`），防止把日志页面裸奔在公网上
 - 容器名旁边显示实时 CPU / 内存占用，口径与 `docker stats` 一致
 
@@ -72,27 +73,67 @@ dlog -listen :8080 -web-token '换成你自己的口令'
 docker compose up -d --build
 ```
 
-Compose 里的挂载有个**必须遵守的规则**：宿主机目录要按它原本的路径挂进去。
+挂载只需要记住一条规则：**冒号右边必须是 `<host-root>` + 宿主机原路径**。
+因为 `/info` 返回的是宿主机语义的路径（如 `/app/docker/data`），程序内部会拼成
+`/host/app/docker/data` 去访问。挂到 `/logs` 这类位置会全部落空。
 
 ```yaml
 volumes:
-  - /app/docker/data:/host/app/docker/data:ro   # 冒号两边必须一致
+  - ${DLOG_DATA_ROOT:-/var/lib/docker}:/host${DLOG_DATA_ROOT:-/var/lib/docker}:ro
   - /var/run/docker.sock:/var/run/docker.sock:ro
 command: ["-host-root", "/host"]
 ```
 
-因为 `/info` 返回的是 `/app/docker/data`（宿主机语义），程序内部会拼成
-`<host-root>/app/docker/data` 去访问。挂到 `/logs` 之类的地方就会全部落空。
+只用一个变量 `DLOG_DATA_ROOT` 表达宿主机上的 data-root，冒号右边由它自动拼出来，
+所以两边不可能不一致。默认值 `/var/lib/docker` 覆盖标准安装。
 
-**daemon.json 不用挂。** 挂了 socket 就能从 `/info` 拿到 data-root，而且拿到的是
-守护进程实际在用的值。只有在不挂 socket（`-no-api` 纯文件模式）时才需要：
+## 路径不用猜：起不来会告诉你该挂哪儿
+
+换一台机器，data-root 可能是 `/var/lib/docker`，也可能被改成 `/app/docker/data`、
+`/data/docker`。dlog 不会让你先去 `cat /etc/docker/daemon.json`，而是：
+
+1. 挂上 socket 启动，它 `GET /info` 问出守护进程**实际生效**的 data-root，
+   再检查这个路径在容器里到底读不读得到；
+2. **读不到不会退出**（`os.Exit(1)` 只会留下一个起不来的容器），而是把结论打成
+   一段可复制的配置写进日志，页面顶部同时渲染成提示卡片（带"复制"按钮）；
+3. 照着把那一行贴进 `volumes`，`docker compose up -d` 重建容器即可。
+
+控制台里长这样：
+
+```
+================ 挂载诊断 ================
+守护进程报告宿主机 data-root 是 /app/docker/data，但容器里读不到 /host/app/docker/data。
+宿主机 /app/docker/data  →  容器内 /host/app/docker/data（来源 docker-api）
+
+然后把 Docker 数据目录挂进来（冒号两边必须指向同一个真实路径）：
+    volumes:
+      - /app/docker/data:/host/app/docker/data:ro
+
+等价的 docker run 写法：
+    docker run ... -v /app/docker/data:/host/app/docker/data:ro ...
+
+改完执行：docker compose up -d —— 必须重建容器，docker restart 不会应用新的挂载
+==========================================
+```
+
+诊断会区分四种情况，给出的建议也不同：
+
+| 诊断 | 含义 | 建议 |
+|---|---|---|
+| `not-mounted` | 从 socket 问到了宿主机路径，但容器里读不到 | 给出该路径对应的 `volumes` 行 |
+| `wrong-dir` | 目录挂进来了，但里面没有 `containers/` | 提示可能挂错了位置，或这台机器还没建过容器 |
+| `no-socket` | 连 socket 都没挂，问不出真实路径 | 先给出 socket 的挂载行，再附默认路径作对照 |
+| `not-found` | 裸机运行也找不到 | 提示检查 Docker 是否启动、是否以 root 运行 |
+
+**daemon.json 不用挂。** `/info` 已经包含 `DockerRootDir` 和 `LoggingDriver`，
+比读配置文件更准（配置文件里写的可能被命令行参数覆盖掉）。只有禁用 socket
+（`-no-api` 纯文件模式）时才需要它：
 
 ```yaml
   - /etc/docker/daemon.json:/host/etc/docker/daemon.json:ro   # 可选
 ```
 
 注意宿主机没有这个文件时，这行会让 docker 建一个同名**目录**，反而导致解析失败。
-遇到这种情况删掉它，直接用 `-data-root /app/docker/data` 写死最省事。
 
 ## 参数
 
@@ -130,7 +171,7 @@ command: ["-host-root", "/host"]
 |---|---|
 | `POST /api/login` | 提交口令换取会话 Cookie |
 | `GET /api/logout` | 清除会话 |
-| `GET /api/meta` | data-root、探测来源、探测过程、socket 与采集可用性 |
+| `GET /api/meta` | data-root、探测来源、探测过程、socket 与采集可用性，以及 `mount` 挂载诊断（含可直接粘贴的 `volume` / `runArg`） |
 | `GET /api/containers` | 容器列表（名字、镜像、状态、日志驱动、日志大小） |
 | `GET /api/logs?container=x&tail=200` | 拉最后 N 条，返回 `{container, entries}` |
 | `GET /api/stream?container=x&tail=300` | SSE 实时流，先补历史再跟随 |
@@ -183,9 +224,10 @@ Cookie 里存的是口令的 SHA-256 派生值而不是口令本身，`HttpOnly`
 |---|---|---|
 | 日志驱动是 `journald` / `syslog` / `fluentd` 等 | 磁盘上没有日志文件 | 需要挂 socket 走 API 兜底，或 `-no-api` 时直接提示不可读 |
 | 容器目录权限不足 | 容器列表为空 | dlog 需以 root 运行（`containers/<id>/` 是 710 且属主 root） |
-| data-root 换了位置但目录没按原路径挂 | 列表为空，meta 显示探测失败 | 按上文的路径一致原则重新挂载，或直接 `-data-root` 写死 |
+| data-root 换了位置但没按原路径挂 | 页面顶部出现「日志目录没有挂进来」，并给出该加的 `volumes` 行 | 照抄那一行 → `docker compose up -d` 重建容器 |
+| 挂到了 `/logs` 之类的位置 | 目录在但空，诊断为 `wrong-dir` | 改成 `<data-root>:<host-root><data-root>:ro` |
+| 完全没挂 socket | 诊断为 `no-socket`，容器列表为空 | 先挂 socket（dlog 才知道真实路径），只读文件可 `-no-api` |
 | 日志轮转（`max-size` / `max-file`） | 轮转瞬间可能丢几行 | 有意取舍，Dozzle 也一样；要完整归档请用 `docker logs` 导出 |
-| 没挂 docker socket | 不显示 CPU/内存，`journald` 容器不可读，data-root 只能靠 daemon.json 或参数 | 需要资源占用就挂 socket；只读文件可加 `-no-api` 彻底断开 |
 
 ## 目录结构
 

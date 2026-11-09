@@ -79,6 +79,45 @@ type SocketInfo struct {
 	LogDriver string
 }
 
+// MountKind 是挂载诊断的结论分类，前端按它决定标题文案。
+type MountKind string
+
+const (
+	MountOK       MountKind = "ok"          // 目录可读且结构正常
+	MountNotMount MountKind = "not-mounted" // 拿到了宿主机路径，但容器里读不到 → 挂载漏了或路径不一致
+	MountWrongDir MountKind = "wrong-dir"   // 路径存在但不像 data-root（缺 containers/ 子目录）
+	MountNoSocket MountKind = "no-socket"   // 没有 socket 也没有配置文件，无从得知真实 data-root
+	MountNotFound MountKind = "not-found"   // 裸机运行且确实找不到
+)
+
+// MountCheck 是"宿主机 data-root 在当前进程里到底挂没挂上"的诊断结果。
+//
+// 容器化部署时最常见的失败不是权限，而是路径挂错了位置：程序从 socket 问得到
+// 宿主机的 /app/docker/data，但容器里那个位置是空的。这时候报一句 not found
+// 毫无帮助，真正有用的是"在 volumes 里加这一行"。所以诊断结果里直接带上
+// 可粘贴的配置片段。
+type MountCheck struct {
+	OK bool `json:"ok"`
+	// Kind 见上面的常量。
+	Kind MountKind `json:"kind"`
+	// HostPath 是宿主机语义的 data-root，也就是 -v 的左边。
+	HostPath string `json:"hostPath,omitempty"`
+	// ContainerPath 是当前进程试图访问的路径，也就是 -v 的右边。
+	ContainerPath string `json:"containerPath,omitempty"`
+	// Source 是 HostPath 的来源（docker-api / daemon.json / default ...）。
+	Source Source `json:"source,omitempty"`
+	// Message 是一句话说明现状。
+	Message string `json:"message"`
+	// Volume 可以直接粘进 compose 的 volumes 行（不含前面的 "- "）。
+	Volume string `json:"volume,omitempty"`
+	// RunArg 是等价的 docker run -v 参数。
+	RunArg string `json:"runArg,omitempty"`
+	// SocketVolume 是 docker socket 的挂载行，仅在连 socket 都没挂时给出。
+	SocketVolume string `json:"socketVolume,omitempty"`
+	// Restart 是改完配置后该执行的命令。
+	Restart string `json:"restart,omitempty"`
+}
+
 // Options 是 Resolve 的输入。
 type Options struct {
 	// DataRoot 是用户显式指定的宿主机路径，一旦指定就必须存在，不再兜底。
@@ -107,6 +146,9 @@ type Resolver struct {
 	Source Source
 	// Daemon 是解析到的 daemon.json 内容（可能为空值）。
 	Daemon DaemonConfig
+	// Mount 是"宿主机路径到底挂没挂上"的诊断，无论解析成功与否都会被填。
+	// 失败场景下它就是修复指引，前端会直接渲染成可复制的配置片段。
+	Mount MountCheck
 	// Notes 按顺序记录每一级探测的成败，排查"为什么日志是空的"时非常有用。
 	Notes []string
 }
@@ -187,23 +229,116 @@ func Resolve(o Options) (*Resolver, error) {
 		cands = append(cands, candidate{root, SourceDefault})
 	}
 
-	// ---- 逐个校验，取第一个真实存在的目录 ----
+	// ---- 逐个校验 ----
+	// 分两轮：先找结构正常的候选（含 containers/ 子目录），都没命中再退让给
+	// "目录存在但不像 data-root"的。因为"目录存在"不等于"挂对了"：把宿主机
+	// 目录挂到 /logs 时 /host/app/docker/data 可能被 docker 自动建成一个空目录，
+	// 这时能读到目录但读不到容器，诊断需要区分这两种情况。
+	var fallback *candidate
 	for _, c := range cands {
 		fsPath := r.FS(c.root)
-		if isDir(fsPath) {
+		if !isDir(fsPath) {
+			r.Notes = append(r.Notes, fmt.Sprintf("候选 %s（来源 %s）不存在：%s", c.root, c.src, fsPath))
+			continue
+		}
+		if isDir(path.Join(fsPath, "containers")) {
 			r.DataRoot = c.root
 			r.Source = c.src
+			r.Mount = r.okMount(c.root, c.src)
 			r.Notes = append(r.Notes, fmt.Sprintf("采用 %s（来源 %s）", c.root, c.src))
 			return r, nil
 		}
-		r.Notes = append(r.Notes, fmt.Sprintf("候选 %s（来源 %s）不存在：%s", c.root, c.src, fsPath))
+		if fallback == nil {
+			cc := c
+			fallback = &cc
+		}
+		r.Notes = append(r.Notes, fmt.Sprintf("候选 %s 存在但没有 containers/ 子目录：%s", c.root, fsPath))
+	}
+
+	// 目录在、结构不对：仍然采用它（否则页面连容器列表都渲染不出来），
+	// 但标记成 wrong-dir 让前端提示"可能挂到了错误的位置"。
+	if fallback != nil {
+		r.DataRoot = fallback.root
+		r.Source = fallback.src
+		r.Mount = r.hintMount(fallback.root, fallback.src, MountWrongDir,
+			fmt.Sprintf("%s 存在，但里面没有 containers/ 子目录。可能是挂载点写错了，也可能是这台机器还没创建过容器。", r.FS(fallback.root)))
+		return r, nil
 	}
 
 	// 显式指定却不存在，是最常见的配置错误，单独强调一下。
 	if explicit != "" {
+		root := normalizeDataRoot(explicit)
+		r.Mount = r.hintMount(root, SourceFlag, MountNotMount,
+			fmt.Sprintf("你指定的 data-root %s 在当前环境里读不到（实际查找 %s）。", root, r.FS(root)))
 		return r, fmt.Errorf("指定的 data-root %s 不可访问（实际查找路径 %s）", explicit, r.FS(explicit))
 	}
-	return r, fmt.Errorf("未能定位 Docker data-root，已尝试 %d 个候选：%s", len(cands), strings.Join(r.Notes, "；"))
+
+	// ---- 全部落空：尽可能猜出宿主机的真实路径，给出修复指引 ----
+	// 优先级和探测链一致：socket 的值最权威，其次是配置文件，最后才是默认路径。
+	guess, guessSrc := "", Source("")
+	if s := strings.TrimSpace(sock.DataRoot); s != "" {
+		guess, guessSrc = normalizeDataRoot(s), SourceDockerAPI
+	} else if root, src := r.Daemon.Root(); root != "" {
+		guess, guessSrc = normalizeDataRoot(root), src
+	} else if len(defaultRoots) > 0 {
+		// 完全没有依据时的兜底猜测：绝大多数标准安装都在 /var/lib/docker。
+		guess, guessSrc = defaultRoots[0], SourceDefault
+	}
+
+	switch {
+	case r.HostRoot == "":
+		// 裸机运行不需要挂载，找不到只可能是 docker 没启动或权限不够。
+		r.Mount = MountCheck{
+			Kind:     MountNotFound,
+			HostPath: guess,
+			Source:   guessSrc,
+			Message:  fmt.Sprintf("在宿主机上找不到 %s。裸机部署不需要挂载，请确认 Docker 已启动，且 dlog 以 root 运行（containers/ 目录是 710 root:root，普通用户进不去）。", guess),
+		}
+	case guessSrc == SourceDefault:
+		// 连 socket 都没有，猜出来的路径不能当作事实，先让用户把 socket 挂上。
+		r.Mount = r.hintMount(guess, guessSrc, MountNoSocket,
+			"docker socket 不可用，既问不到真实 data-root，也没有配置文件可读。先挂上 socket，dlog 就能直接问守护进程要路径（下面同时给出默认路径的挂法，供你对照）。")
+		r.Mount.SocketVolume = "/var/run/docker.sock:/var/run/docker.sock:ro"
+	default:
+		r.Mount = r.hintMount(guess, guessSrc, MountNotMount,
+			fmt.Sprintf("守护进程报告宿主机 data-root 是 %s，但容器里读不到 %s。说明这行挂载没加，或者冒号右边的路径和左边不一致。", guess, r.FS(guess)))
+	}
+
+	// 错误串保持简短：每一级的失败原因已经按行记在 Notes 里，
+	// 再拼一遍只会让启动日志变成一堵墙。
+	return r, fmt.Errorf("未能定位 Docker data-root（已尝试 %d 个候选，逐级原因见 Notes）", len(cands))
+}
+
+// okMount 生成"一切正常"的诊断。
+func (r *Resolver) okMount(hostPath string, src Source) MountCheck {
+	return MountCheck{
+		OK:            true,
+		Kind:          MountOK,
+		HostPath:      hostPath,
+		ContainerPath: r.FS(hostPath),
+		Source:        src,
+		Message:       fmt.Sprintf("已通过 %s 读取 %s", r.FS(hostPath), src),
+	}
+}
+
+// hintMount 生成"读不到，教你怎么挂"的诊断。
+//
+// 只有容器化部署（HostRoot 非空）才需要挂载，裸机场景下 Volume/RunArg 留空，
+// 免得给出一句在宿主机上毫无意义的 -v。
+func (r *Resolver) hintMount(hostPath string, src Source, kind MountKind, msg string) MountCheck {
+	m := MountCheck{Kind: kind, HostPath: hostPath, Source: src, Message: msg}
+	if hostPath == "" {
+		return m
+	}
+	m.ContainerPath = r.FS(hostPath)
+	if r.HostRoot != "" {
+		// 冒号两边必须指向同一个真实路径，否则 dlog 拼出来的路径全部落空。
+		m.Volume = fmt.Sprintf("%s:%s:ro", hostPath, m.ContainerPath)
+		m.RunArg = "-v " + m.Volume
+		// 改 volumes 之后必须重建容器：docker restart 沿用旧配置，不会应用新挂载。
+		m.Restart = "docker compose up -d —— 必须重建容器，docker restart 不会应用新的挂载"
+	}
+	return m
 }
 
 // FS 把宿主机语义路径换算成当前进程可访问的路径。
@@ -227,7 +362,12 @@ func (r *Resolver) FS(p string) string {
 }
 
 // ContainersDir 返回容器元数据目录（每个容器一个子目录）。
+// 定位失败时 DataRoot 为空，此时返回空串——调用方据此跳过扫描，
+// 而不是拿着相对路径 "containers" 去读当前工作目录。
 func (r *Resolver) ContainersDir() string {
+	if r.DataRoot == "" {
+		return ""
+	}
 	return r.FS(path.Join(r.DataRoot, "containers"))
 }
 

@@ -137,6 +137,34 @@ mark{background:rgba(76,154,255,.3);color:inherit;border-radius:2px;padding:0 1p
   padding:7px 15px;font-size:12px;font-weight:650;border-radius:20px;
   box-shadow:0 6px 18px rgba(0,0,0,.5);
 }
+/* ---------- 挂载诊断 ---------- */
+/* 定位不到 data-root 时占据日志区顶部。内容可能较长（socket + 数据目录 + 重建命令），
+   给个高度上限，超出自己滚，别把日志区挤没。 */
+.mountwarn{
+  margin:10px 14px 0;padding:12px 14px 4px;border-radius:10px;
+  max-height:46vh;overflow:auto;
+  background:rgba(214,161,58,.07);border:1px solid rgba(214,161,58,.3);
+  color:#d8caa6;font-size:12.5px;line-height:1.65;
+}
+.mountwarn.err{background:rgba(240,100,92,.07);border-color:rgba(240,100,92,.3);color:#e6c7c4}
+.mountwarn h4{margin:0 0 7px;font-size:13px;font-weight:600;letter-spacing:.2px;color:var(--warn)}
+.mountwarn.err h4{color:var(--err)}
+.mountwarn p{margin:0 0 8px}
+.mountwarn b{color:var(--fg);font-weight:600}
+.mountwarn .cd{position:relative;margin:0 0 9px}
+.mountwarn code{
+  display:block;background:#0c131c;border:1px solid #212f3c;border-radius:6px;
+  padding:9px 46px 9px 11px;font-family:var(--mono);font-size:12px;color:#a9d6f2;
+  white-space:pre;overflow-x:auto;
+}
+.mountwarn .cp{
+  position:absolute;top:5px;right:6px;padding:3px 8px;font-size:11px;
+  background:#182634;border:1px solid #2b3d4e;color:#9fb6c9;border-radius:5px;
+}
+.mountwarn .cp:hover{background:#22323f;color:#dbe9f5}
+.mountwarn .foot{font-size:11.5px;color:var(--dim)}
+.cempty{padding:14px;color:var(--dim);font-size:12px;line-height:1.7}
+
 .toast{
   position:fixed;left:50%;bottom:26px;transform:translateX(-50%);
   background:#1c2a38;border:1px solid #2c4256;color:var(--fg);
@@ -173,6 +201,9 @@ mark{background:rgba(76,154,255,.3);color:inherit;border-radius:2px;padding:0 1p
         <button class="ghost" id="btnClear">清空</button>
       </div>
     </header>
+
+    <!-- 挂载诊断：定位不到 data-root 时由 renderMount 填充，并给出可复制的修复片段 -->
+    <div class="mountwarn" id="mountwarn" hidden></div>
 
     <div class="toolbar">
       <input id="kw" class="kw" placeholder="过滤关键字，多个用空格分隔" autocomplete="off">
@@ -228,7 +259,8 @@ mark{background:rgba(76,154,255,.3);color:inherit;border-radius:2px;padding:0 1p
     pendingNew: 0,
     statsOK: false,
     statsTimer: null,
-    hsize: 400
+    hsize: 400,
+    mountBroken: false
   };
 
   function maxLines() { return Math.max(BASE_MAX, S.hsize); }
@@ -520,6 +552,13 @@ mark{background:rgba(76,154,255,.3);color:inherit;border-radius:2px;padding:0 1p
     }
 
     clist.appendChild(frag);
+    if (!S.containers.length) {
+      // 空列表要说明原因，否则看起来像页面坏了
+      var tip = document.createElement('div');
+      tip.className = 'cempty';
+      tip.textContent = S.mountBroken ? '数据目录还没挂进来，看右侧提示' : '没有找到容器';
+      clist.appendChild(tip);
+    }
     $('sidefoot').innerHTML = '共 <b>' + S.containers.length + '</b> 个容器，显示 <b>' + shown + '</b>';
   }
 
@@ -575,14 +614,103 @@ mark{background:rgba(76,154,255,.3);color:inherit;border-radius:2px;padding:0 1p
     sel.title = '最多可回溯 ' + cap + ' 行';
   }
 
+  // ---------------- 挂载诊断 ----------------
+
+  // 定位不到 data-root 时，后端已经从 socket 问出了宿主机真实路径，并算好了
+  // "该往 volumes 里加哪一行"。这里只负责渲染 + 一键复制——用户照着改完
+  // 重建容器即可，不需要自己去猜路径。
+  var MOUNT_TITLE = {
+    'not-mounted': '日志目录没有挂进来',
+    'wrong-dir': '挂载点可能指向了错误的位置',
+    'no-socket': '读不到 Docker 的配置',
+    'not-found': '找不到 Docker 数据目录'
+  };
+  var MOUNT_ERR = { 'not-mounted': 1, 'wrong-dir': 1, 'not-found': 1 };
+  var codeCache = [];
+
+  function codeBlock(text) {
+    var i = codeCache.push(text) - 1;
+    return '<div class="cd"><code>' + esc(text) +
+      '<button class="cp" data-i="' + i + '">复制</button></code></div>';
+  }
+
+  function copyText(t) {
+    function ok() { toast('已复制'); }
+    function bad() { toast('复制失败，请手动选中复制'); }
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      navigator.clipboard.writeText(t).then(ok, function () { fallbackCopy(t, ok, bad); });
+    } else {
+      fallbackCopy(t, ok, bad);
+    }
+  }
+
+  // 页面若不是 https/localhost，clipboard API 不可用，退回 execCommand。
+  function fallbackCopy(t, ok, bad) {
+    var ta = document.createElement('textarea');
+    ta.value = t;
+    ta.style.position = 'fixed';
+    ta.style.opacity = '0';
+    document.body.appendChild(ta);
+    ta.select();
+    var done = false;
+    try { done = document.execCommand('copy'); } catch (e) { done = false; }
+    document.body.removeChild(ta);
+    done ? ok() : bad();
+  }
+
+  function renderMount(m) {
+    var box = $('mountwarn');
+    var broken = !!(m && !m.ok);
+    if (broken !== S.mountBroken) {
+      S.mountBroken = broken;
+      renderClist(); // 左侧空列表的文案要跟着变
+    }
+    if (!broken) { box.hidden = true; box.innerHTML = ''; return; }
+
+    codeCache = [];
+    var bad = !!MOUNT_ERR[m.kind];
+    var h = '<h4>' + (bad ? '✕ ' : '! ') + esc(MOUNT_TITLE[m.kind] || '配置需要处理') + '</h4>';
+    h += '<p>' + esc(m.message || '') + '</p>';
+
+    if (m.hostPath && m.containerPath && m.hostPath !== m.containerPath) {
+      h += '<p>宿主机 <b>' + esc(m.hostPath) + '</b> → 容器内 <b>' + esc(m.containerPath) + '</b>' +
+           (m.source ? ' · 来源 <b>' + esc(m.source) + '</b>' : '') + '</p>';
+    }
+    if (m.socketVolume) {
+      h += '<p>先把 docker socket 挂进来，dlog 才能问出真实 data-root：</p>' +
+           codeBlock('- ' + m.socketVolume);
+    }
+    if (m.volume) {
+      h += '<p>在 compose 的 <b>volumes:</b> 里加这一行（冒号两边必须指向同一个真实路径）：</p>' +
+           codeBlock('- ' + m.volume);
+      if (m.runArg) h += '<p>等价的 <b>docker run</b> 参数：</p>' + codeBlock(m.runArg);
+    }
+    if (m.restart) h += '<p class="foot">' + esc(m.restart) + '</p>';
+
+    box.innerHTML = h;
+    box.className = 'mountwarn' + (bad ? ' err' : '');
+    box.hidden = false;
+  }
+
+  $('mountwarn').addEventListener('click', function (e) {
+    var btn = e.target.closest ? e.target.closest('.cp') : null;
+    if (!btn) return;
+    copyText(codeCache[+btn.dataset.i] || '');
+  });
+
   async function loadMeta() {
     try {
       var res = await fetch('/api/meta');
       if (res.status === 401) { location.reload(); return; }
       var m = await res.json();
-      var txt = esc(m.dataRoot);
-      if (m.hostRoot) txt = esc(m.hostRoot) + ' → ' + txt;
-      $('meta').innerHTML = txt + '<br>驱动 ' + esc(m.defaultDriver) + ' · 来源 ' + esc(m.source);
+      var txt = m.dataRoot
+        ? esc(m.dataRoot)
+        : '<span style="color:#d6a13a">数据目录未确定</span>';
+      if (m.hostRoot && m.dataRoot) txt = esc(m.hostRoot) + ' → ' + txt;
+      $('meta').innerHTML = txt + '<br>驱动 ' + esc(m.defaultDriver) + ' · 来源 ' + esc(m.source || '-');
+
+      // 挂载不健康时把修复建议顶到日志区上方
+      renderMount(m.mount);
 
       var notes = (m.notes || []).slice();
       if (m.authEnabled) notes.push('已启用访问口令');

@@ -89,6 +89,12 @@ func NewScanner(dir, defaultDriver string) *Scanner {
 // 单个容器解析失败不会中断整体流程：容器正在重建、目录权限不足、
 // config.v2.json 半写状态都可能发生，让整个页面 500 是最差的选择。
 func (s *Scanner) List() ([]Container, error) {
+	// data-root 没定位到时 Dir 为空：这不是错误，是"还没配好"，
+	// 返回空列表让页面去渲染诊断提示，比抛 500 友好得多。
+	if strings.TrimSpace(s.Dir) == "" {
+		return []Container{}, nil
+	}
+
 	entries, err := os.ReadDir(s.Dir)
 	if err != nil {
 		return nil, fmt.Errorf("读取容器目录 %s 失败: %w", s.Dir, err)

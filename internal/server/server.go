@@ -124,6 +124,9 @@ func (s *Server) handleMeta(w http.ResponseWriter, r *http.Request) {
 		"apiAvailable":   apiOK,
 		"authEnabled":    s.cfg.Token != "",
 		"statsAvailable": s.cfg.Stats != nil,
+		// mount 是挂载诊断：ok=true 时只是展示路径；false 时前端会渲染成
+		// "该往 compose 里加哪一行"的修复指引，并附可复制的配置片段。
+		"mount": s.cfg.Resolver.Mount,
 		// 前端据此渲染"历史行数"下拉框：超出 tailMax 的请求会被夹紧，
 		// 与其让用户选了没效果，不如一开始就不提供这个选项。
 		"tailDefault": s.cfg.TailDefault,

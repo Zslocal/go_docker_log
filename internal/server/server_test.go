@@ -85,11 +85,11 @@ func TestContainersEndpoint(t *testing.T) {
 
 	var body struct {
 		Containers []struct {
-			ID        string `json:"id"`
-			Name      string `json:"name"`
-			Running   bool   `json:"running"`
-			HasLogFile bool  `json:"hasLogFile"`
-			LogSize   int64  `json:"logSize"`
+			ID         string `json:"id"`
+			Name       string `json:"name"`
+			Running    bool   `json:"running"`
+			HasLogFile bool   `json:"hasLogFile"`
+			LogSize    int64  `json:"logSize"`
 		} `json:"containers"`
 		Total int `json:"total"`
 	}
@@ -267,5 +267,58 @@ func TestMetaEndpoint(t *testing.T) {
 	// 前端靠这三个值渲染"历史行数"下拉框，缺了会退化成写死的默认值。
 	if m.TailDefault <= 0 || m.TailMax < m.TailDefault || m.TailBytes <= 0 {
 		t.Errorf("tail 配置不合法: default=%d max=%d bytes=%d", m.TailDefault, m.TailMax, m.TailBytes)
+	}
+}
+
+// 定位失败时服务仍要能起来：页面拿到的是"该怎么挂"的建议 + 空容器列表，
+// 而不是 500。这是容器化部署第一次启动的默认路径，必须友好。
+func TestMetaExposesMountDiagnosis(t *testing.T) {
+	res := &dockerpath.Resolver{
+		Mount: dockerpath.MountCheck{
+			Kind:          dockerpath.MountNotMount,
+			HostPath:      "/app/docker/data",
+			ContainerPath: "/host/app/docker/data",
+			Source:        dockerpath.SourceDockerAPI,
+			Message:       "守护进程报告宿主机 data-root 是 /app/docker/data，但容器里读不到",
+			Volume:        "/app/docker/data:/host/app/docker/data:ro",
+			RunArg:        "-v /app/docker/data:/host/app/docker/data:ro",
+			Restart:       "docker compose up -d",
+		},
+	}
+	srv := New(Config{Resolver: res, TailDefault: 100})
+	ts := httptest.NewServer(srv.Routes(nil))
+	defer ts.Close()
+
+	var m struct {
+		DataRoot string `json:"dataRoot"`
+		Mount    struct {
+			OK     bool   `json:"ok"`
+			Kind   string `json:"kind"`
+			Volume string `json:"volume"`
+		} `json:"mount"`
+	}
+	if code := getJSON(t, ts.URL+"/api/meta", &m); code != 200 {
+		t.Fatalf("状态码 = %d", code)
+	}
+	if m.Mount.OK {
+		t.Error("mount.ok 应为 false")
+	}
+	if m.Mount.Kind != "not-mounted" {
+		t.Errorf("mount.kind = %q, 期望 not-mounted", m.Mount.Kind)
+	}
+	if !strings.Contains(m.Mount.Volume, "/host/app/docker/data:ro") {
+		t.Errorf("mount.volume = %q", m.Mount.Volume)
+	}
+
+	// data-root 为空时容器列表必须是 200 + 空数组
+	var list struct {
+		Containers []struct{} `json:"containers"`
+		Total      int        `json:"total"`
+	}
+	if code := getJSON(t, ts.URL+"/api/containers", &list); code != 200 {
+		t.Fatalf("容器列表状态码 = %d，诊断模式不应报错", code)
+	}
+	if list.Total != 0 {
+		t.Errorf("total = %d, 期望 0", list.Total)
 	}
 }

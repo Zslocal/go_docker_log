@@ -83,16 +83,17 @@ func main() {
 	}
 
 	res, err := dockerpath.Resolve(probe)
-	if err != nil {
-		logger.Printf("定位 Docker 数据目录失败：%v", err)
-		for _, n := range res.Notes {
-			logger.Printf("  · %s", n)
-		}
-		os.Exit(1)
-	}
 	for _, n := range res.Notes {
 		logger.Printf("探测：%s", n)
 	}
+	if err != nil {
+		// 定位失败不退出。容器化部署里"看不到日志"九成是挂载问题，而 dlog
+		// 已经从 socket 问出了宿主机的真实路径——这时候最有用的动作是把
+		// 修复方法直接摆到用户面前：控制台打一份，页面再显示一份。
+		// 退出只会留下一个容器起不来，用户还得自己去猜路径。
+		logger.Printf("定位 Docker 数据目录失败：%v", err)
+	}
+	printMountHint(logger, res)
 
 	// ---- 3. 检查 socket 是否真的可用（决定要不要提示降级）----
 	if api != nil {
@@ -151,7 +152,11 @@ func main() {
 
 	go func() {
 		logger.Printf("dlog %s 启动，监听 %s", version, *listen)
-		logger.Printf("数据目录 %s（来源 %s），容器目录 %s", res.DataRoot, res.Source, res.ContainersDir())
+		if res.DataRoot == "" {
+			logger.Printf("数据目录未确定：页面会显示挂载修复建议")
+		} else {
+			logger.Printf("数据目录 %s（来源 %s），容器目录 %s", res.DataRoot, res.Source, res.ContainersDir())
+		}
 
 		switch {
 		case *webToken == "":
@@ -178,4 +183,47 @@ func main() {
 	if err := httpSrv.Shutdown(shutCtx); err != nil {
 		logger.Printf("关闭超时：%v", err)
 	}
+}
+
+// printMountHint 把"该怎么改"打到日志里。
+//
+// 格式刻意保持可以直接复制粘贴：先用一行说明现状，再给 volumes 行、
+// docker run 参数，最后给重建命令。日志会被 docker logs 收集，所以这里
+// 不做花哨排版，缩进 4 空格即可。
+func printMountHint(logger *log.Logger, res *dockerpath.Resolver) {
+	m := res.Mount
+	if m.OK {
+		return
+	}
+
+	logger.Printf("")
+	logger.Printf("================ 挂载诊断 ================")
+	logger.Printf("%s", m.Message)
+	if m.HostPath != "" && m.ContainerPath != "" && m.HostPath != m.ContainerPath {
+		logger.Printf("宿主机 %s  →  容器内 %s（来源 %s）", m.HostPath, m.ContainerPath, m.Source)
+	}
+
+	if m.SocketVolume != "" {
+		logger.Printf("")
+		logger.Printf("第一步，先把 docker socket 挂进来，dlog 才能问出真实路径：")
+		logger.Printf("    volumes:")
+		logger.Printf("      - %s", m.SocketVolume)
+	}
+
+	if m.Volume != "" {
+		logger.Printf("")
+		logger.Printf("然后把 Docker 数据目录挂进来（冒号两边必须指向同一个真实路径）：")
+		logger.Printf("    volumes:")
+		logger.Printf("      - %s", m.Volume)
+		logger.Printf("")
+		logger.Printf("等价的 docker run 写法：")
+		logger.Printf("    docker run ... %s ...", m.RunArg)
+	}
+
+	if m.Restart != "" {
+		logger.Printf("")
+		logger.Printf("改完执行：%s", m.Restart)
+	}
+	logger.Printf("==========================================")
+	logger.Printf("")
 }
