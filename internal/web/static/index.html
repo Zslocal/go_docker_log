@@ -94,6 +94,40 @@ button{font:inherit;cursor:pointer;border-radius:6px}
 .kw{flex:1 1 220px;min-width:150px;background:var(--bg);border:1px solid var(--line);border-radius:6px;padding:5px 10px;color:var(--fg);font-size:12px;outline:none}
 .kw:focus{border-color:var(--accent)}
 .kw::placeholder{color:#4d5f70}
+
+/* 时间段筛选：工具栏位置紧张，做成按钮 + 浮层，默认不占地方 */
+.rwrap{position:relative;flex:0 0 auto}
+.trange{font-family:var(--mono);font-size:11.5px;max-width:210px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.trange.on{color:var(--accent);border-color:rgba(76,154,255,.45);background:rgba(76,154,255,.08)}
+.rangepop{
+  position:absolute;top:calc(100% + 7px);left:0;z-index:60;width:320px;
+  background:var(--panel2);border:1px solid #2c4256;border-radius:9px;
+  padding:12px;box-shadow:0 14px 38px rgba(0,0,0,.55);
+}
+.rp-head{font-size:12px;color:var(--fg);margin-bottom:9px;display:flex;align-items:baseline;gap:7px}
+.rp-scope{font-size:10.5px;color:var(--dim);font-family:var(--mono)}
+.rp-quick{display:flex;flex-wrap:wrap;gap:5px;margin-bottom:10px}
+.rp-quick button{
+  background:var(--bg);border:1px solid var(--line);border-radius:5px;
+  color:var(--dim);font-size:11px;padding:3px 7px;cursor:pointer;font-family:inherit;
+}
+.rp-quick button:hover{color:var(--fg);border-color:#3a5570}
+.rp-row{display:flex;flex-direction:column;gap:7px;margin-bottom:11px}
+.rp-row label{display:flex;align-items:center;gap:7px;font-size:11.5px;color:var(--dim)}
+.rp-row input{
+  flex:1;min-width:0;background:var(--bg);border:1px solid var(--line);border-radius:5px;
+  padding:4px 7px;color:var(--fg);font-size:11.5px;font-family:var(--mono);outline:none;
+  color-scheme:dark;
+}
+.rp-row input:focus{border-color:var(--accent)}
+.rp-foot{display:flex;gap:7px;justify-content:flex-end}
+.rp-btn{
+  background:var(--bg);border:1px solid var(--line);border-radius:5px;color:var(--fg);
+  font-size:11.5px;padding:4px 12px;cursor:pointer;font-family:inherit;
+}
+.rp-btn:hover{border-color:#3a5570}
+.rp-btn.primary{background:rgba(76,154,255,.14);border-color:rgba(76,154,255,.5);color:#8dc0ff}
+.rp-btn.primary:hover{background:rgba(76,154,255,.22)}
 .levels{display:flex;gap:2px;background:var(--bg);border:1px solid var(--line);border-radius:6px;padding:2px}
 .lv{background:none;border:none;color:var(--dim);font-size:11.5px;padding:3px 9px;border-radius:4px}
 .lv:hover{color:var(--fg)}
@@ -212,6 +246,26 @@ mark{background:rgba(76,154,255,.3);color:inherit;border-radius:2px;padding:0 1p
 
     <div class="toolbar">
       <input id="kw" class="kw" placeholder="过滤关键字，多个用空格分隔" autocomplete="off">
+      <div class="rwrap">
+        <button class="ghost trange" id="btnRange" title="按时间段筛选，可与关键字组合">时间段</button>
+        <div class="rangepop" id="rangepop" hidden>
+          <div class="rp-head">时间段筛选<span class="rp-scope" id="rpScope"></span></div>
+          <div class="rp-quick" id="rpQuick">
+            <button data-min="1">最近 1 分钟</button>
+            <button data-min="5">5 分钟</button>
+            <button data-min="30">30 分钟</button>
+            <button data-min="60">1 小时</button>
+          </div>
+          <div class="rp-row">
+            <label>从<input type="datetime-local" id="rgFrom" step="1"></label>
+            <label>到<input type="datetime-local" id="rgTo" step="1"></label>
+          </div>
+          <div class="rp-foot">
+            <button class="rp-btn primary" id="rgApply">应用</button>
+            <button class="rp-btn" id="rgClear">清除</button>
+          </div>
+        </div>
+      </div>
       <div class="levels" id="levels">
         <button class="lv active" data-lv="all">全部</button>
         <button class="lv" data-lv="err">错误</button>
@@ -275,6 +329,8 @@ mark{background:rgba(76,154,255,.3);color:inherit;border-radius:2px;padding:0 1p
     statsTimer: null,
     hsize: 400,
     tsMode: 'datetime',
+    rangeFrom: 0,
+    rangeTo: 0,
     mountBroken: false
   };
 
@@ -390,6 +446,18 @@ mark{background:rgba(76,154,255,.3);color:inherit;border-radius:2px;padding:0 1p
 
   function match(e) {
     if (S.minLevel !== 'all' && RANK[e.lv] < RANK[S.minLevel]) return false;
+
+    // 时间段是第一个条件，关键字在结果里再筛一层。
+    // 没有时间的行（非 JSON 的兜底行）无法判定是否落在范围内，筛选期间直接排除，
+    // 否则会出现"明明设了范围却混进几条无关内容"。
+    if (S.rangeFrom || S.rangeTo) {
+      var d = entryDate(e);
+      if (!d) return false;
+      var t = d.getTime();
+      if (S.rangeFrom && t < S.rangeFrom) return false;
+      if (S.rangeTo && t > S.rangeTo) return false;
+    }
+
     if (S.kws.length) {
       var low = e.log.toLowerCase();
       for (var i = 0; i < S.kws.length; i++) {
@@ -850,6 +918,7 @@ mark{background:rgba(76,154,255,.3);color:inherit;border-radius:2px;padding:0 1p
     setConn('wait', '连接中');
     renderClist();
     updateCount();
+    refreshRangeBtn();
     pollStats();
 
     var url = '/api/stream?container=' + encodeURIComponent(c.id) + '&tail=' + S.hsize;
@@ -893,6 +962,146 @@ mark{background:rgba(76,154,255,.3);color:inherit;border-radius:2px;padding:0 1p
   });
 
   var kwTimer = null;
+  // ---------------- 时间段筛选 ----------------
+
+  // datetime-local 的值不带时区，必须自己按本地时间构造，
+  // 用 new Date(str) 在部分浏览器上会按 UTC 解释，差 8 小时。
+  function parseLocalInput(v) {
+    if (!v) return 0;
+    var m = String(v).match(/^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})(?::(\d{2}))?/);
+    if (!m) return 0;
+    var d = new Date(+m[1], +m[2] - 1, +m[3], +m[4], +m[5], +(m[6] || 0));
+    var t = d.getTime();
+    return isNaN(t) ? 0 : t;
+  }
+
+  function toLocalInput(ms) {
+    var d = new Date(ms);
+    return d.getFullYear() + '-' + pad(d.getMonth() + 1) + '-' + pad(d.getDate()) +
+      'T' + pad(d.getHours()) + ':' + pad(d.getMinutes()) + ':' + pad(d.getSeconds());
+  }
+
+  function fmtHM(ms) { var d = new Date(ms); return pad(d.getHours()) + ':' + pad(d.getMinutes()); }
+  function fmtMD(ms) { var d = new Date(ms); return pad(d.getMonth() + 1) + '-' + pad(d.getDate()); }
+  function sameDay(a, b) { return fmtMD(a) === fmtMD(b) && new Date(a).getFullYear() === new Date(b).getFullYear(); }
+
+  // 按钮上显示当前生效的范围，让人一眼知道"日志被过滤过了"
+  function fmtRange() {
+    var f = S.rangeFrom, t = S.rangeTo;
+    if (!f && !t) return '时间段';
+    if (f && t) return sameDay(f, t) ? fmtHM(f) + '~' + fmtHM(t) : fmtMD(f) + ' ' + fmtHM(f) + '~' + fmtMD(t) + ' ' + fmtHM(t);
+    if (f) return '从 ' + fmtHM(f);
+    return '到 ' + fmtHM(t);
+  }
+
+  function refreshRangeBtn() {
+    var btn = $('btnRange');
+    var on = !!(S.rangeFrom || S.rangeTo);
+    btn.textContent = fmtRange();
+    btn.classList.toggle('on', on);
+    btn.title = on
+      ? '已按时间段筛选（点击修改）。与关键字、级别条件是叠加关系'
+      : '按时间段筛选，可与关键字组合';
+    renderScope();
+  }
+
+  // 时间筛选只作用于已经加载到浏览器的行，说清楚边界，免得以为日志丢了
+  function renderScope() {
+    var el = $('rpScope');
+    if (!el) return;
+    if (!S.entries.length) { el.textContent = '暂无已加载日志'; return; }
+    var first = 0, last = 0;
+    for (var i = 0; i < S.entries.length; i++) {
+      var d = entryDate(S.entries[i]);
+      if (!d) continue;
+      if (!first) first = d.getTime();
+      last = d.getTime();
+    }
+    el.textContent = first
+      ? '已加载 ' + fmtMD(first) + ' ' + fmtHM(first) + ' ~ ' + fmtHM(last)
+      : '已加载 ' + S.entries.length + ' 行';
+  }
+
+  function applyRange(from, to, quiet) {
+    if (from && to && to < from) {
+      toast('结束时间不能早于开始时间');
+      return false;
+    }
+    S.rangeFrom = from;
+    S.rangeTo = to;
+    $('rgFrom').value = from ? toLocalInput(from) : '';
+    $('rgTo').value = to ? toLocalInput(to) : '';
+    refreshRangeBtn();
+    rerender();
+
+    if (!quiet) {
+      var shown = 0;
+      for (var i = 0; i < S.entries.length; i++) if (match(S.entries[i])) shown++;
+      if (!from && !to) {
+        toast('已清除时间段筛选');
+      } else if (shown === 0) {
+        // 空结果最常见的原因是范围早于已加载的历史，给出可操作的指引
+        var earliest = 0;
+        for (var j = 0; j < S.entries.length; j++) {
+          var d = entryDate(S.entries[j]);
+          if (d) { earliest = d.getTime(); break; }
+        }
+        if (from && earliest && from < earliest) {
+          toast('该时间段早于已加载的日志，把「历史」调大后重试');
+        } else {
+          toast('该时间段内没有符合条件的日志');
+        }
+      } else {
+        toast('命中 ' + shown + ' / ' + S.entries.length + ' 行');
+      }
+    }
+    return true;
+  }
+
+  function openRangePop(open) {
+    var pop = $('rangepop');
+    pop.hidden = !open;
+    if (open) {
+      renderScope();
+      // 打开时把当前生效的值回填，方便微调
+      $('rgFrom').value = S.rangeFrom ? toLocalInput(S.rangeFrom) : '';
+      $('rgTo').value = S.rangeTo ? toLocalInput(S.rangeTo) : '';
+    }
+  }
+
+  $('btnRange').addEventListener('click', function (e) {
+    e.stopPropagation();
+    openRangePop($('rangepop').hidden);
+  });
+
+  // 点浮层内部不关闭，点别处才关
+  $('rangepop').addEventListener('click', function (e) { e.stopPropagation(); });
+  document.addEventListener('click', function () { if (!$('rangepop').hidden) openRangePop(false); });
+  document.addEventListener('keydown', function (e) {
+    if (e.key === 'Escape' && !$('rangepop').hidden) openRangePop(false);
+  });
+
+  $('rpQuick').addEventListener('click', function (e) {
+    var btn = e.target.closest('button[data-min]');
+    if (!btn) return;
+    // 只设下界，上界留空：这样新产生的日志会继续进来，
+    // 否则"最近 5 分钟"会变成点下按钮那一刻的静态窗口，自动滚动看起来像卡住了。
+    applyRange(Date.now() - parseInt(btn.dataset.min, 10) * 60000, 0);
+    openRangePop(false);
+  });
+
+  $('rgApply').addEventListener('click', function () {
+    var from = parseLocalInput($('rgFrom').value);
+    var to = parseLocalInput($('rgTo').value);
+    if (!from && !to) { toast('请先选择时间，或点上面的快捷按钮'); return; }
+    if (applyRange(from, to)) openRangePop(false);
+  });
+
+  $('rgClear').addEventListener('click', function () {
+    applyRange(0, 0);
+    openRangePop(false);
+  });
+
   $('kw').addEventListener('input', function (e) {
     clearTimeout(kwTimer);
     var v = e.target.value.trim().toLowerCase();
@@ -1014,6 +1223,7 @@ mark{background:rgba(76,154,255,.3);color:inherit;border-radius:2px;padding:0 1p
   // ---------------- 启动 ----------------
 
   applyTsMode(savedTsMode());
+  refreshRangeBtn();
 
   // 先用本地记住的档位渲染一遍，避免首屏按默认值请求；
   // meta 返回后再用服务端 tail-max 校正可选项。
