@@ -3,6 +3,7 @@ package server
 import (
 	"bufio"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -320,5 +321,147 @@ func TestMetaExposesMountDiagnosis(t *testing.T) {
 	}
 	if list.Total != 0 {
 		t.Errorf("total = %d, 期望 0", list.Total)
+	}
+}
+
+// ---------------------------------------------------------------- 时间段查询
+
+// 测试日志的三条时间分别是 01:00:00 / 01:00:01 / 01:00:02 (UTC)。
+func msAt(sec int) int64 {
+	base := time.Date(2026, 11, 9, 1, 0, 0, 0, time.UTC)
+	return base.Add(time.Duration(sec) * time.Second).UnixMilli()
+}
+
+// 时间段查询不能受 tail 行数限制：只给 tail=1 也要能拿到窗口内的全部 2 条。
+func TestLogsByTimeRangeIgnoresTail(t *testing.T) {
+	ts, id := newTestServer(t)
+
+	url := fmt.Sprintf("%s/api/logs?container=%s&tail=1&from=%d&to=%d", ts.URL, id, msAt(0), msAt(1))
+	var body struct {
+		Mode      string `json:"mode"`
+		Total     int    `json:"total"`
+		Truncated bool   `json:"truncated"`
+		FirstAt   string `json:"firstAt"`
+		LastAt    string `json:"lastAt"`
+		Entries   []struct {
+			Log string `json:"log"`
+		} `json:"entries"`
+	}
+	if code := getJSON(t, url, &body); code != 200 {
+		t.Fatalf("状态码 = %d", code)
+	}
+	if body.Mode != "range" {
+		t.Errorf("mode = %q, 期望 range", body.Mode)
+	}
+	if body.Total != 2 || len(body.Entries) != 2 {
+		t.Fatalf("条数 = %d/%d, 期望 2（tail=1 不应限制时段查询）", body.Total, len(body.Entries))
+	}
+	if body.Entries[0].Log != "boot ok\n" {
+		t.Errorf("首条 = %q", body.Entries[0].Log)
+	}
+	// 空结果时前端靠它告诉用户"日志里其实只有哪一段"
+	if body.FirstAt == "" || body.LastAt == "" {
+		t.Errorf("应返回文件时间跨度: %+v", body)
+	}
+}
+
+func TestLogsByTimeRangeEmpty(t *testing.T) {
+	ts, id := newTestServer(t)
+
+	url := fmt.Sprintf("%s/api/logs?container=%s&from=%d&to=%d", ts.URL, id, msAt(3600), msAt(7200))
+	var body struct {
+		Total   int        `json:"total"`
+		Entries []struct{} `json:"entries"`
+	}
+	if code := getJSON(t, url, &body); code != 200 {
+		t.Fatalf("状态码 = %d", code)
+	}
+	if body.Total != 0 || len(body.Entries) != 0 {
+		t.Errorf("应当为空结果, 实际 %d", body.Total)
+	}
+}
+
+func TestSpanEndpoint(t *testing.T) {
+	ts, id := newTestServer(t)
+
+	var body struct {
+		Available bool   `json:"available"`
+		FirstAt   string `json:"firstAt"`
+		LastAt    string `json:"lastAt"`
+		Size      int64  `json:"size"`
+	}
+	if code := getJSON(t, ts.URL+"/api/span?container="+id, &body); code != 200 {
+		t.Fatalf("状态码 = %d", code)
+	}
+	if !body.Available || body.FirstAt == "" || body.Size <= 0 {
+		t.Fatalf("span 结果不完整: %+v", body)
+	}
+	if !strings.HasPrefix(body.FirstAt, "2026-11-09T01:00:00") {
+		t.Errorf("firstAt = %q", body.FirstAt)
+	}
+}
+
+// journald 容器没有本地文件，span 应明确回报不可用而不是报错。
+func TestSpanEndpointNoLocalFile(t *testing.T) {
+	ts, _ := newTestServer(t)
+
+	var body struct {
+		Available bool   `json:"available"`
+		Driver    string `json:"driver"`
+	}
+	if code := getJSON(t, ts.URL+"/api/span?container=sys", &body); code != 200 {
+		t.Fatalf("状态码 = %d", code)
+	}
+	if body.Available || body.Driver != "journald" {
+		t.Errorf("journald 容器应报告不可用: %+v", body)
+	}
+}
+
+// 实时流带 from 时应先推一条 meta，再推该时间段的历史。
+func TestStreamWithRangeSendsMetaFirst(t *testing.T) {
+	ts, id := newTestServer(t)
+
+	url := fmt.Sprintf("%s/api/stream?container=%s&from=%d", ts.URL, id, msAt(1))
+	req, err := http.NewRequest(http.MethodGet, url, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	client := &http.Client{Timeout: 3 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+
+	sc := bufio.NewScanner(resp.Body)
+	var meta string
+	var logs []string
+	for sc.Scan() {
+		line := sc.Text()
+		if strings.HasPrefix(line, "data: ") {
+			if meta == "" {
+				meta = strings.TrimPrefix(line, "data: ")
+			} else {
+				logs = append(logs, strings.TrimPrefix(line, "data: "))
+			}
+		}
+		if len(logs) >= 2 {
+			break
+		}
+	}
+
+	var m struct {
+		Mode      string `json:"mode"`
+		Total     int    `json:"total"`
+		Truncated bool   `json:"truncated"`
+	}
+	if err := json.Unmarshal([]byte(meta), &m); err != nil {
+		t.Fatalf("meta 帧解析失败: %v (%q)", err, meta)
+	}
+	if m.Mode != "range" || m.Total != 2 {
+		t.Errorf("meta = %+v, 期望 mode=range total=2", m)
+	}
+	if len(logs) != 2 {
+		t.Fatalf("历史条数 = %d, 期望 2", len(logs))
 	}
 }

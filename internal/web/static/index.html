@@ -61,6 +61,8 @@ button{font:inherit;cursor:pointer;border-radius:6px}
 .badge.live{color:var(--ok);border-color:rgba(63,185,80,.35)}
 .badge.wait{color:var(--warn);border-color:rgba(214,161,58,.35)}
 .badge.dead{color:var(--err);border-color:rgba(240,100,92,.35)}
+/* 时间段快照：不是实时流，用蓝色区分开 */
+.badge.snap{color:#8dc0ff;border-color:rgba(76,154,255,.4)}
 
 /* 暂停跟随时的小提示，点一下回到最新 */
 .pauseflag{
@@ -91,21 +93,23 @@ button{font:inherit;cursor:pointer;border-radius:6px}
 .ghost:disabled{opacity:.35;cursor:not-allowed}
 
 .toolbar{display:flex;align-items:center;gap:11px;padding:8px 16px;border-bottom:1px solid var(--line);background:var(--panel);flex-wrap:wrap}
-.kw{flex:1 1 220px;min-width:150px;background:var(--bg);border:1px solid var(--line);border-radius:6px;padding:5px 10px;color:var(--fg);font-size:12px;outline:none}
+.kw{flex:1 1 160px;min-width:120px;background:var(--bg);border:1px solid var(--line);border-radius:6px;padding:5px 10px;color:var(--fg);font-size:12px;outline:none}
 .kw:focus{border-color:var(--accent)}
 .kw::placeholder{color:#4d5f70}
 
 /* 时间段筛选：工具栏位置紧张，做成按钮 + 浮层，默认不占地方 */
 .rwrap{position:relative;flex:0 0 auto}
-.trange{font-family:var(--mono);font-size:11.5px;max-width:210px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.trange{font-family:var(--mono);font-size:11.5px;max-width:172px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .trange.on{color:var(--accent);border-color:rgba(76,154,255,.45);background:rgba(76,154,255,.08)}
 .rangepop{
   position:absolute;top:calc(100% + 7px);left:0;z-index:60;width:320px;
   background:var(--panel2);border:1px solid #2c4256;border-radius:9px;
   padding:12px;box-shadow:0 14px 38px rgba(0,0,0,.55);
 }
-.rp-head{font-size:12px;color:var(--fg);margin-bottom:9px;display:flex;align-items:baseline;gap:7px}
+.rp-head{font-size:12px;color:var(--fg);margin-bottom:4px;display:flex;align-items:baseline;gap:7px;flex-wrap:wrap}
 .rp-scope{font-size:10.5px;color:var(--dim);font-family:var(--mono)}
+/* 说清语义：时段是回到文件里定位，跟"历史 N 行"不是一回事 */
+.rp-hint{font-size:10.5px;color:#5f7284;line-height:1.5;margin:0 0 9px}
 .rp-quick{display:flex;flex-wrap:wrap;gap:5px;margin-bottom:10px}
 .rp-quick button{
   background:var(--bg);border:1px solid var(--line);border-radius:5px;
@@ -140,6 +144,9 @@ button{font:inherit;cursor:pointer;border-radius:6px}
 .hsize{background:var(--bg);border:1px solid var(--line);border-radius:6px;padding:4px 6px;color:var(--fg);font-size:11.5px;font-family:var(--mono);outline:none;cursor:pointer}
 .hsize:focus{border-color:var(--accent)}
 .hsize option{background:var(--panel);color:var(--fg)}
+/* 时段查询生效时"历史行数"没有意义，直接置灰免得误导 */
+.hsize:disabled{opacity:.4;cursor:not-allowed}
+.switch.off{opacity:.45;cursor:not-allowed}
 
 /* ---------- 日志窗 ---------- */
 .viewer{
@@ -150,6 +157,10 @@ button{font:inherit;cursor:pointer;border-radius:6px}
 .empty .t{font-size:13px;color:#8b9aa9;font-family:inherit}
 .empty .s{font-size:11.5px;color:#4d5f70;font-family:inherit}
 .viewer.has-data .empty{display:none}
+/* 查询/过滤后一行都没有时的说明，比"白屏"有用 */
+.emptybox{position:absolute;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:6px;pointer-events:none;text-align:center;padding:0 24px}
+.emptybox .t{font-size:13px;color:#8b9aa9;font-family:inherit}
+.emptybox .s{font-size:11.5px;color:#4d5f70;font-family:var(--mono)}
 
 .line{display:flex;gap:9px;padding:0 16px;border-left:2px solid transparent}
 .line:hover{background:#0f1620}
@@ -247,14 +258,16 @@ mark{background:rgba(76,154,255,.3);color:inherit;border-radius:2px;padding:0 1p
     <div class="toolbar">
       <input id="kw" class="kw" placeholder="过滤关键字，多个用空格分隔" autocomplete="off">
       <div class="rwrap">
-        <button class="ghost trange" id="btnRange" title="按时间段筛选，可与关键字组合">时间段</button>
+        <button class="ghost trange" id="btnRange" title="按时间段查日志，直接在文件里定位，不受历史行数限制">时间段</button>
         <div class="rangepop" id="rangepop" hidden>
-          <div class="rp-head">时间段筛选<span class="rp-scope" id="rpScope"></span></div>
+          <div class="rp-head">按时间段查日志<span class="rp-scope" id="rpScope"></span></div>
+          <div class="rp-hint">直接在日志文件里按时间戳定位，跟「历史行数」无关；只填「从」会继续跟进新日志，填了「到」就是这段时间的快照。</div>
           <div class="rp-quick" id="rpQuick">
             <button data-min="1">最近 1 分钟</button>
             <button data-min="5">5 分钟</button>
             <button data-min="30">30 分钟</button>
             <button data-min="60">1 小时</button>
+            <button data-today="1">今天</button>
           </div>
           <div class="rp-row">
             <label>从<input type="datetime-local" id="rgFrom" step="1"></label>
@@ -329,12 +342,23 @@ mark{background:rgba(76,154,255,.3);color:inherit;border-radius:2px;padding:0 1p
     statsTimer: null,
     hsize: 400,
     tsMode: 'datetime',
+    // 时间条件一律用毫秒（JS Date 只有毫秒精度）。
+    // 它是"回后端按时间戳查文件"的条件，不是在前端已加载的行里再筛一遍。
     rangeFrom: 0,
     rangeTo: 0,
+    spanFirst: '',   // 当前容器日志文件的实际起止时间，浮层里显示给用户看
+    spanLast: '',
+    rangeTotal: 0,   // 窗口内实际条数（可能大于已载入的条数）
+    rangeTrunc: false,
+    rangeCut: false,
+    rangeNote: '',
+    keepMin: 0,      // 时段查询一次载入的行数，trim 时要保住这批
+    loading: false,  // 批量载入期间不裁剪
     mountBroken: false
   };
 
   function maxLines() { return Math.max(BASE_MAX, S.hsize); }
+  function rangeOn() { return !!(S.rangeFrom || S.rangeTo); }
 
   // ---------------- 工具 ----------------
 
@@ -444,19 +468,10 @@ mark{background:rgba(76,154,255,.3);color:inherit;border-radius:2px;padding:0 1p
 
   // ---------------- 过滤 ----------------
 
+  // 时间段不走这里：它已经是"回后端按时间戳查文件"得到的行集合，
+  // 前端再筛一遍只会筛掉边界上的行。实时模式下新到的一行由 addEntry 判掉。
   function match(e) {
     if (S.minLevel !== 'all' && RANK[e.lv] < RANK[S.minLevel]) return false;
-
-    // 时间段是第一个条件，关键字在结果里再筛一层。
-    // 没有时间的行（非 JSON 的兜底行）无法判定是否落在范围内，筛选期间直接排除，
-    // 否则会出现"明明设了范围却混进几条无关内容"。
-    if (S.rangeFrom || S.rangeTo) {
-      var d = entryDate(e);
-      if (!d) return false;
-      var t = d.getTime();
-      if (S.rangeFrom && t < S.rangeFrom) return false;
-      if (S.rangeTo && t > S.rangeTo) return false;
-    }
 
     if (S.kws.length) {
       var low = e.log.toLowerCase();
@@ -465,6 +480,18 @@ mark{background:rgba(76,154,255,.3);color:inherit;border-radius:2px;padding:0 1p
       }
     }
     return true;
+  }
+
+  // 实时追加的行要按当前时段条件判一下：只填「从」时新日志天然在范围内，
+  // 但万一容器时钟回拨或者跨了边界，也不该混进来。
+  function outsideRange(raw) {
+    if (!rangeOn()) return false;
+    var d = entryDate(raw);
+    if (!d) return false;
+    var t = d.getTime();
+    if (S.rangeFrom && t < S.rangeFrom) return true;
+    if (S.rangeTo && t > S.rangeTo) return true;
+    return false;
   }
 
   function highlight(text) {
@@ -501,17 +528,45 @@ mark{background:rgba(76,154,255,.3);color:inherit;border-radius:2px;padding:0 1p
     return d;
   }
 
+  // 一行都没有时给个说明，而不是留一片空白
+  function emptyHint() {
+    var box = document.createElement('div');
+    box.className = 'emptybox';
+
+    var t = document.createElement('div');
+    t.className = 't';
+    var s = document.createElement('div');
+    s.className = 's';
+
+    if (!S.entries.length && rangeOn()) {
+      t.textContent = '这个时间段没有日志';
+      s.textContent = S.spanFirst ? '该容器的日志范围：' + fmtSpan(S.spanFirst, S.spanLast) : '';
+    } else if (S.entries.length) {
+      t.textContent = '当前过滤条件下没有匹配的行';
+      s.textContent = '该时段共 ' + S.entries.length + ' 行，换个关键字或点「全部」试试';
+    } else {
+      t.textContent = '暂无可显示的日志';
+    }
+
+    box.appendChild(t);
+    if (s.textContent) box.appendChild(s);
+    return box;
+  }
+
   function rerender() {
     viewer.classList.add('has-data');
     viewer.innerHTML = '';
     var frag = document.createDocumentFragment();
+    var shown = 0;
     for (var i = 0; i < S.entries.length; i++) {
       var e = S.entries[i];
       if (!match(e)) { e.el = null; continue; }
       if (!e.el) e.el = buildLine(e);
       frag.appendChild(e.el);
+      shown++;
     }
     viewer.appendChild(frag);
+    if (!shown) viewer.appendChild(emptyHint());
     if (S.autoScroll) viewer.scrollTop = viewer.scrollHeight;
     updateCount();
   }
@@ -519,10 +574,33 @@ mark{background:rgba(76,154,255,.3);color:inherit;border-radius:2px;padding:0 1p
   function updateCount() {
     var shown = 0;
     for (var i = 0; i < S.entries.length; i++) if (match(S.entries[i])) shown++;
-    $('count').textContent = shown + ' / ' + S.entries.length + ' 行';
+
+    var el = $('count');
+    el.textContent = shown + ' / ' + S.entries.length + ' 行';
+
+    if (!rangeOn()) {
+      el.title = '已载入 ' + S.entries.length + ' 行，过滤后显示 ' + shown + ' 行';
+      return;
+    }
+    // 时段查询的条数是后端数出来的，跟"载入了多少行"是两件事
+    var total = S.rangeTotal || S.entries.length;
+    var tip = '时间段内共 ' + total + ' 行';
+    if (S.rangeTrunc) tip += '，单次最多载入 ' + S.entries.length + ' 行（超出的部分没取）';
+    if (S.rangeCut) tip += '\n该窗口太大，单次最多扫 256 MiB，更早的部分没有读';
+    if (S.kws.length || S.minLevel !== 'all') tip += '\n再叠加关键字/级别过滤后显示 ' + shown + ' 行';
+    el.title = tip;
+  }
+
+  // 关键字高亮是写死在行 DOM 里的，改了关键字必须重建（只重建命中的那些行）
+  function rebuild() {
+    for (var i = 0; i < S.entries.length; i++) S.entries[i].el = null;
+    var keepTop = viewer.scrollTop;
+    rerender();
+    if (!S.autoScroll) viewer.scrollTop = keepTop;
   }
 
   var scrollQueued = false;
+
   function scheduleScroll() {
     if (scrollQueued) return;
     scrollQueued = true;
@@ -586,7 +664,9 @@ mark{background:rgba(76,154,255,.3);color:inherit;border-radius:2px;padding:0 1p
   }
 
   function trim() {
-    var over = S.entries.length - maxLines();
+    if (S.loading) return;
+    // 时段查询载入的那一批要原样留着，只在它之后的部分按历史行数滚动淘汰
+    var over = S.entries.length - (maxLines() + S.keepMin);
     if (over <= 0) return;
 
     // 暂停跟随时删掉头部行会让内容整体上移，这里把位移补回去，
@@ -608,10 +688,15 @@ mark{background:rgba(76,154,255,.3);color:inherit;border-radius:2px;padding:0 1p
     }
   }
 
-  function addEntry(raw) {
+  // prefiltered=true 表示这批行本来就是后端按时间段取出来的，不必再判边界。
+  function addEntry(raw, prefiltered) {
     var log = raw.log || '';
+    if (!prefiltered && outsideRange(raw)) return;
+
     var e = {
       ts: raw.ts || 0,
+      // 纳秒时间戳超出 JS 安全整数，原串必须原样留着，否则毫秒位会打滑
+      tsText: raw.tsText || '',
       stream: raw.stream || 'stdout',
       log: log,
       lv: detectLv(log),
@@ -619,6 +704,12 @@ mark{background:rgba(76,154,255,.3);color:inherit;border-radius:2px;padding:0 1p
     };
     S.entries.push(e);
     trim();
+
+    if (S.entries.length === 1) {
+      // 第一条真实日志进来时把"没有日志"的提示撤掉
+      var hint = viewer.querySelector('.emptybox');
+      if (hint) hint.remove();
+    }
 
     if (match(e)) {
       e.el = buildLine(e);
@@ -724,6 +815,7 @@ mark{background:rgba(76,154,255,.3);color:inherit;border-radius:2px;padding:0 1p
     S.hsize = pick;
 
     var sel = $('hsize');
+    sel.dataset.cap = String(cap);
     sel.innerHTML = '';
     for (var j = 0; j < list.length; j++) {
       var o = document.createElement('option');
@@ -732,7 +824,8 @@ mark{background:rgba(76,154,255,.3);color:inherit;border-radius:2px;padding:0 1p
       if (list[j] === pick) o.selected = true;
       sel.appendChild(o);
     }
-    sel.title = '最多可回溯 ' + cap + ' 行';
+    // 标题和禁用态由 refreshRangeBtn 统一维护（它知道当前有没有时段条件）
+    refreshRangeBtn();
   }
 
   // ---------------- 挂载诊断 ----------------
@@ -891,39 +984,70 @@ mark{background:rgba(76,154,255,.3);color:inherit;border-radius:2px;padding:0 1p
     b.textContent = text;
   }
 
-  // force 用于"同一个容器但要重新拉历史"的场景（比如切换历史行数），
+  // force 用于"同一个容器但要重新拉一遍"的场景（切换历史行数、改时间段），
   // 否则重复点同一个容器会被去重挡掉。
   function select(c, force) {
     if (!force && S.current && S.current.id === c.id) return;
     S.current = c;
     S.failCount = 0;
-
-    if (S.es) { S.es.close(); S.es = null; }
-
-    S.entries = [];
-    S.pendingNew = 0;
-    S.autoScroll = true;
-    $('autoScroll').checked = true;
-    viewer.innerHTML = '';
-    viewer.classList.add('has-data');
-    viewer.scrollTop = 0;
-    lastTop = 0;
-    jump.hidden = true;
-    $('pauseflag').hidden = true;
-    $('chips').innerHTML = '';
+    S.spanFirst = S.spanLast = '';
 
     $('cname').textContent = c.name;
     $('btnDownload').disabled = !c.hasLogFile;
     $('stateDot').className = 'dot' + (c.running ? ' run' : '');
-    setConn('wait', '连接中');
+    $('chips').innerHTML = '';
     renderClist();
-    updateCount();
     refreshRangeBtn();
     pollStats();
 
-    var url = '/api/stream?container=' + encodeURIComponent(c.id) + '&tail=' + S.hsize;
+    openSource();
+    loadSpan();
+  }
+
+  // 清空日志区（不动连接以外的东西）
+  function clearEntries() {
+    S.entries = [];
+    S.pendingNew = 0;
+    S.rangeTotal = 0;
+    S.rangeTrunc = false;
+    S.rangeCut = false;
+    S.rangeNote = '';
+    S.keepMin = 0;
+    viewer.innerHTML = '';
+    viewer.classList.add('has-data');
+    jump.hidden = true;
+    $('pauseflag').hidden = true;
+    updateCount();
+  }
+
+  // openSource 按当前条件决定日志从哪来：
+  //   没设时间 / 只填「从」-> SSE 实时流，历史从时间戳或末尾 N 行起头
+  //   填了「到」           -> 一次性取该时段的快照，不再跟实时
+  // 两条路都不受"历史 N 行"限制（时段查询是回文件里定位的）。
+  function openSource() {
+    if (S.es) { S.es.close(); S.es = null; }
+    clearEntries();
+
+    S.autoScroll = true;
+    $('autoScroll').checked = true;
+    viewer.scrollTop = 0;
+    lastTop = 0;
+
+    if (!S.current) return;
+
+    if (S.rangeTo) { loadSnapshot(); return; }
+
+    setConn('wait', '连接中');
+    var url = '/api/stream?container=' + encodeURIComponent(S.current.id) + '&tail=' + S.hsize;
+    if (S.rangeFrom) url += '&from=' + S.rangeFrom;
+
     var es = new EventSource(url);
     S.es = es;
+
+    // 时段模式下服务端先发一条 meta（窗口内共多少行、日志覆盖哪段时间）
+    es.addEventListener('meta', function (ev) {
+      try { readRangeMeta(JSON.parse(ev.data)); } catch (e) { /* 忽略坏帧 */ }
+    });
 
     es.addEventListener('log', function (ev) {
       try { addEntry(JSON.parse(ev.data)); } catch (e) { /* 忽略坏帧 */ }
@@ -950,8 +1074,76 @@ mark{background:rgba(76,154,255,.3);color:inherit;border-radius:2px;padding:0 1p
 
     es.onopen = function () {
       S.failCount = 0;
-      setConn('live', '实时');
+      setConn('live', rangeOn() ? '实时 · 时段' : '实时');
     };
+  }
+
+  function readRangeMeta(m) {
+    if (!m || m.mode !== 'range') return;
+    S.rangeTotal = m.total || 0;
+    S.rangeTrunc = !!m.truncated;
+    S.rangeCut = !!m.cut;
+    S.rangeNote = m.note || '';
+    if (m.firstAt) { S.spanFirst = m.firstAt; S.spanLast = m.lastAt || m.firstAt; }
+    updateCount();
+
+    // 时段查询一条都没有：直接把说明放在日志区，不用等 toast 消失
+    if (m.total === 0 && !S.entries.length) {
+      var hint = viewer.querySelector('.emptybox');
+      if (hint) hint.remove();
+      viewer.appendChild(emptyHint());
+    }
+  }
+
+  // loadSnapshot 一次性把某个时间窗内的日志取回来。
+  // 上界是固定时刻，后续不会再有行落进来，所以不挂实时流。
+  async function loadSnapshot() {
+    setConn('wait', '查询中');
+
+    var url = '/api/logs?container=' + encodeURIComponent(S.current.id) +
+              '&from=' + (S.rangeFrom || 0) + '&to=' + (S.rangeTo || 0);
+
+    var data;
+    try {
+      var res = await fetch(url);
+      if (res.status === 401) { location.reload(); return; }
+      data = await res.json();
+    } catch (e) {
+      setConn('dead', '查询失败');
+      return;
+    }
+    if (data.error) { setConn('dead', data.error); toast(data.error); return; }
+
+    var list = data.entries || [];
+    S.loading = true;   // 批量载入期间别让 trim 把刚拿到的行裁掉
+    for (var i = 0; i < list.length; i++) addEntry(list[i], true);
+    S.loading = false;
+    S.keepMin = S.entries.length;
+
+    S.rangeTotal = data.total || list.length;
+    S.rangeTrunc = !!data.truncated;
+    S.rangeCut = !!data.cut;
+    S.rangeNote = data.note || '';
+    if (data.firstAt) { S.spanFirst = data.firstAt; S.spanLast = data.lastAt || data.firstAt; }
+    setConn('snap', '时段快照');
+    updateCount();
+
+    if (S.autoScroll) viewer.scrollTop = viewer.scrollHeight;
+
+    if (data.note) {
+      toast(data.note);
+    } else if (!list.length) {
+      toast(S.spanFirst
+        ? '该时间段没有日志；这个容器的日志范围是 ' + fmtSpan(S.spanFirst, S.spanLast)
+        : '该时间段没有日志');
+    } else if (S.rangeTrunc) {
+      toast('该时段共 ' + S.rangeTotal + ' 行，只载入了前 ' + list.length + ' 行；把时间段收窄一点能看全');
+    } else {
+      toast('已载入该时段全部 ' + list.length + ' 行');
+    }
+
+    // 一条都没取到：在日志区留下常驻说明（toast 三秒就没了）
+    if (!list.length) rerender();
   }
 
   // ---------------- 事件绑定 ----------------
@@ -985,7 +1177,21 @@ mark{background:rgba(76,154,255,.3);color:inherit;border-radius:2px;padding:0 1p
   function fmtMD(ms) { var d = new Date(ms); return pad(d.getMonth() + 1) + '-' + pad(d.getDate()); }
   function sameDay(a, b) { return fmtMD(a) === fmtMD(b) && new Date(a).getFullYear() === new Date(b).getFullYear(); }
 
-  // 按钮上显示当前生效的范围，让人一眼知道"日志被过滤过了"
+  // 把 docker 原始时间串渲染成"11-10 13:48:00 ~ 11-10 14:16:02"
+  function fmtSpan(a, b) {
+    var da = Date.parse(a);
+    if (isNaN(da)) return '';
+    var x = new Date(da);
+    var s = fmtMD(da) + ' ' + pad(x.getHours()) + ':' + pad(x.getMinutes()) + ':' + pad(x.getSeconds());
+    var db = Date.parse(b || '');
+    if (!isNaN(db)) {
+      var y = new Date(db);
+      s += ' ~ ' + fmtMD(db) + ' ' + pad(y.getHours()) + ':' + pad(y.getMinutes()) + ':' + pad(y.getSeconds());
+    }
+    return s;
+  }
+
+  // 按钮上显示当前生效的范围，让人一眼知道"现在看的是哪一段"
   function fmtRange() {
     var f = S.rangeFrom, t = S.rangeTo;
     if (!f && !t) return '时间段';
@@ -996,65 +1202,65 @@ mark{background:rgba(76,154,255,.3);color:inherit;border-radius:2px;padding:0 1p
 
   function refreshRangeBtn() {
     var btn = $('btnRange');
-    var on = !!(S.rangeFrom || S.rangeTo);
+    var on = rangeOn();
     btn.textContent = fmtRange();
     btn.classList.toggle('on', on);
     btn.title = on
-      ? '已按时间段筛选（点击修改）。与关键字、级别条件是叠加关系'
-      : '按时间段筛选，可与关键字组合';
-    renderScope();
+      ? '已按时间段查日志（点击修改）：直接回文件里按时间戳定位，与历史行数无关，可与关键字叠加'
+      : '按时间段查日志：直接回文件里按时间戳定位，与历史行数无关';
+
+    // "历史 N 行"只在实时模式下有意义，时段查询自己决定取多少条
+    var sel = $('hsize');
+    sel.disabled = on;
+    var lab = sel.closest ? sel.closest('label') : null;
+    if (lab) lab.classList.toggle('off', on);
+    sel.title = on
+      ? '时段查询按时间戳取全部日志，不受历史行数限制'
+      : '最多可回溯 ' + (sel.dataset.cap || '') + ' 行';
   }
 
-  // 时间筛选只作用于已经加载到浏览器的行，说清楚边界，免得以为日志丢了
-  function renderScope() {
+  // 把当前容器日志文件实际覆盖的时间段显示出来：
+  // 用户设时间之前就知道"我要查的那段到底在不在日志里"。
+  async function loadSpan() {
     var el = $('rpScope');
     if (!el) return;
-    if (!S.entries.length) { el.textContent = '暂无已加载日志'; return; }
-    var first = 0, last = 0;
-    for (var i = 0; i < S.entries.length; i++) {
-      var d = entryDate(S.entries[i]);
-      if (!d) continue;
-      if (!first) first = d.getTime();
-      last = d.getTime();
+
+    if (!S.current) { el.textContent = ''; return; }
+    if (!S.current.hasLogFile) {
+      el.textContent = '日志不在本地文件（' + (S.current.logDriver || '未知驱动') + '）';
+      return;
     }
-    el.textContent = first
-      ? '已加载 ' + fmtMD(first) + ' ' + fmtHM(first) + ' ~ ' + fmtHM(last)
-      : '已加载 ' + S.entries.length + ' 行';
+
+    try {
+      var res = await fetch('/api/span?container=' + encodeURIComponent(S.current.id));
+      var d = await res.json();
+      if (d.available && d.firstAt) {
+        S.spanFirst = d.firstAt;
+        S.spanLast = d.lastAt || d.firstAt;
+        el.textContent = '日志范围 ' + fmtSpan(d.firstAt, d.lastAt) + ' · ' + fmtSize(d.size);
+      } else {
+        el.textContent = '日志文件还是空的';
+      }
+    } catch (e) { el.textContent = ''; }
   }
 
-  function applyRange(from, to, quiet) {
+  // 设置时间段。这是"重新取一次日志"，不是在已经载入的行里再筛一遍，
+  // 所以直接按新条件重开数据源。
+  function applyRange(from, to) {
     if (from && to && to < from) {
       toast('结束时间不能早于开始时间');
       return false;
     }
+
+    var cleared = !from && !to;
     S.rangeFrom = from;
     S.rangeTo = to;
     $('rgFrom').value = from ? toLocalInput(from) : '';
     $('rgTo').value = to ? toLocalInput(to) : '';
     refreshRangeBtn();
-    rerender();
+    openSource();
 
-    if (!quiet) {
-      var shown = 0;
-      for (var i = 0; i < S.entries.length; i++) if (match(S.entries[i])) shown++;
-      if (!from && !to) {
-        toast('已清除时间段筛选');
-      } else if (shown === 0) {
-        // 空结果最常见的原因是范围早于已加载的历史，给出可操作的指引
-        var earliest = 0;
-        for (var j = 0; j < S.entries.length; j++) {
-          var d = entryDate(S.entries[j]);
-          if (d) { earliest = d.getTime(); break; }
-        }
-        if (from && earliest && from < earliest) {
-          toast('该时间段早于已加载的日志，把「历史」调大后重试');
-        } else {
-          toast('该时间段内没有符合条件的日志');
-        }
-      } else {
-        toast('命中 ' + shown + ' / ' + S.entries.length + ' 行');
-      }
-    }
+    if (cleared) toast('已清除时间段，回到实时日志');
     return true;
   }
 
@@ -1062,7 +1268,7 @@ mark{background:rgba(76,154,255,.3);color:inherit;border-radius:2px;padding:0 1p
     var pop = $('rangepop');
     pop.hidden = !open;
     if (open) {
-      renderScope();
+      loadSpan();
       // 打开时把当前生效的值回填，方便微调
       $('rgFrom').value = S.rangeFrom ? toLocalInput(S.rangeFrom) : '';
       $('rgTo').value = S.rangeTo ? toLocalInput(S.rangeTo) : '';
@@ -1082,11 +1288,19 @@ mark{background:rgba(76,154,255,.3);color:inherit;border-radius:2px;padding:0 1p
   });
 
   $('rpQuick').addEventListener('click', function (e) {
-    var btn = e.target.closest('button[data-min]');
+    var btn = e.target.closest ? e.target.closest('button') : null;
     if (!btn) return;
-    // 只设下界，上界留空：这样新产生的日志会继续进来，
-    // 否则"最近 5 分钟"会变成点下按钮那一刻的静态窗口，自动滚动看起来像卡住了。
-    applyRange(Date.now() - parseInt(btn.dataset.min, 10) * 60000, 0);
+
+    if (btn.dataset.today) {
+      var d = new Date();
+      d.setHours(0, 0, 0, 0);
+      // 今天 0 点起，上界留空：今天的日志还在长，要能继续跟进
+      applyRange(d.getTime(), 0);
+    } else {
+      // 只设下界，上界留空：新产生的日志继续进来，
+      // 否则"最近 5 分钟"会变成点下按钮那一刻的静态窗口。
+      applyRange(Date.now() - parseInt(btn.dataset.min, 10) * 60000, 0);
+    }
     openRangePop(false);
   });
 
@@ -1094,6 +1308,8 @@ mark{background:rgba(76,154,255,.3);color:inherit;border-radius:2px;padding:0 1p
     var from = parseLocalInput($('rgFrom').value);
     var to = parseLocalInput($('rgTo').value);
     if (!from && !to) { toast('请先选择时间，或点上面的快捷按钮'); return; }
+    // 「到」精确到秒，服务端按这一毫秒的最后一纳秒收尾，
+    // 所以选 13:48:00 不会把 13:48:00.5 的日志切掉。
     if (applyRange(from, to)) openRangePop(false);
   });
 
@@ -1107,7 +1323,7 @@ mark{background:rgba(76,154,255,.3);color:inherit;border-radius:2px;padding:0 1p
     var v = e.target.value.trim().toLowerCase();
     kwTimer = setTimeout(function () {
       S.kws = v ? v.split(/\s+/).filter(Boolean) : [];
-      rerender();
+      rebuild();
     }, 180);
   });
 
@@ -1144,6 +1360,7 @@ mark{background:rgba(76,154,255,.3);color:inherit;border-radius:2px;padding:0 1p
 
   $('btnClear').addEventListener('click', function () {
     S.entries = [];
+    S.keepMin = 0;
     viewer.innerHTML = '';
     viewer.classList.add('has-data');
     jump.hidden = true;
@@ -1160,6 +1377,8 @@ mark{background:rgba(76,154,255,.3);color:inherit;border-radius:2px;padding:0 1p
     if (S.current) {
       var still = list.filter(function (x) { return x.id === S.current.id; })[0];
       if (still) { S.current = still; $('stateDot').className = 'dot' + (still.running ? ' run' : ''); }
+      // 按当前条件重取一遍（时段模式下就是重新查这个窗口）
+      openSource();
     }
     toast('已刷新');
   });

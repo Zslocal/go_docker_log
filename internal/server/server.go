@@ -85,6 +85,7 @@ func (s *Server) Routes(static http.Handler) http.Handler {
 	mux.HandleFunc("/api/containers", s.handleContainers)
 	mux.HandleFunc("/api/logs", s.handleLogs)
 	mux.HandleFunc("/api/stream", s.handleStream)
+	mux.HandleFunc("/api/span", s.handleSpan)
 	mux.HandleFunc("/api/download", s.handleDownload)
 	mux.HandleFunc("/api/stats", s.handleStats)
 	if static != nil {
@@ -253,6 +254,21 @@ func (s *Server) handleLogs(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// 带 from/to 就是"按时间段查"，走文件定位，跟 tail 行数无关。
+	if from, to := parseMs(q.Get("from")), parseMs(q.Get("to")); from > 0 || to > 0 {
+		res, err := s.readRange(r.Context(), c, from, to, 0)
+		if err != nil {
+			status := http.StatusInternalServerError
+			if errors.Is(err, os.ErrNotExist) {
+				status = http.StatusNotFound
+			}
+			writeError(w, status, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, rangePayload(c, res, from, to))
+		return
+	}
+
 	tail := s.tailCount(q.Get("tail"))
 
 	var entries []logsrc.Entry
@@ -272,8 +288,91 @@ func (s *Server) handleLogs(w http.ResponseWriter, r *http.Request) {
 
 	writeJSON(w, http.StatusOK, map[string]any{
 		"container": c.Name,
+		"mode":      "tail",
 		"entries":   entries,
 		"total":     len(entries),
+	})
+}
+
+// ---------------------------------------------------------------- 时间段
+
+// readRange 取出某段时间内的日志。limit<=0 用默认上限。
+func (s *Server) readRange(ctx context.Context, c containers.Container, fromMs, toMs int64, limit int) (*logsrc.RangeResult, error) {
+	opt := logsrc.Range{From: nsFromMs(fromMs, false), To: nsFromMs(toMs, true), Limit: limit}
+
+	if c.HasLogFile {
+		return logsrc.ReadRange(c.LogFile, opt)
+	}
+
+	// 日志不在本地文件里（journald / syslog 等），只能从 docker API 拉一段
+	// 再从里面筛，所以早期日志看不到——Note 会把这个限制告诉前端。
+	entries, err := s.apiTail(ctx, c, s.cfg.TailMax)
+	if err != nil {
+		return nil, err
+	}
+
+	res := &logsrc.RangeResult{
+		Note: fmt.Sprintf("该容器的日志由 %s 驱动管理，只能从 docker API 取最近 %d 行再筛选", c.LogDriver, s.cfg.TailMax),
+	}
+	for _, e := range entries {
+		if opt.From > 0 && e.Ts > 0 && e.Ts < opt.From {
+			continue
+		}
+		if opt.To > 0 && e.Ts > opt.To {
+			break
+		}
+		res.Entries = append(res.Entries, e)
+	}
+	res.Total = len(res.Entries)
+	if res.Total > 0 {
+		res.FirstAt = res.Entries[0].TsText
+		res.LastAt = res.Entries[res.Total-1].TsText
+	}
+	return res, nil
+}
+
+// rangePayload 统一时段查询的响应结构，SSE 的 meta 事件也用同一份字段。
+func rangePayload(c containers.Container, res *logsrc.RangeResult, fromMs, toMs int64) map[string]any {
+	return map[string]any{
+		"container":  c.Name,
+		"mode":       "range",
+		"entries":    res.Entries,
+		"total":      res.Total,
+		"truncated":  res.Truncated,
+		"cut":        res.Cut,
+		"firstAt":    res.FirstAt,
+		"lastAt":     res.LastAt,
+		"note":       res.Note,
+		"bytes":      res.Bytes,
+		"from":       fromMs,
+		"to":         toMs,
+		"hasLogFile": c.HasLogFile,
+	}
+}
+
+// handleSpan 回答"这个容器的日志覆盖哪段时间"，只读首行和尾块，很便宜。
+// 用户设时间段之前先看一眼，就知道自己要查的那段到底在不在日志里。
+func (s *Server) handleSpan(w http.ResponseWriter, r *http.Request) {
+	c, err := s.lookup(r.URL.Query().Get("container"))
+	if err != nil {
+		writeError(w, http.StatusNotFound, err)
+		return
+	}
+	if !c.HasLogFile {
+		writeJSON(w, http.StatusOK, map[string]any{"available": false, "driver": c.LogDriver})
+		return
+	}
+
+	first, last, size, err := logsrc.SpanFile(c.LogFile)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"available": first != "",
+		"firstAt":   first,
+		"lastAt":    last,
+		"size":      size,
 	})
 }
 
@@ -333,6 +432,7 @@ func (s *Server) handleStream(w http.ResponseWriter, r *http.Request) {
 	flusher.Flush()
 
 	tail := s.tailCount(q.Get("tail"))
+	from, to := parseMs(q.Get("from")), parseMs(q.Get("to"))
 
 	// 浏览器自动重连时会带回上次的 id（我们放的是条目纳秒时间戳），
 	// 靠它去重就不必担心重连后历史被重复推送一遍。
@@ -354,12 +454,27 @@ func (s *Server) handleStream(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if since == 0 {
-		entries, err := logsrc.ReadTail(c.LogFile, tail, s.cfg.TailBytes)
-		if err != nil {
-			s.sendEventErr(w, flusher, fmt.Errorf("读取日志文件失败: %w", err))
+		if from > 0 || to > 0 {
+			// 时间段模式：历史来自"文件里查这个窗口"，而不是"最后 N 行"。
+			res, err := s.readRange(r.Context(), c, from, to, 0)
+			if err != nil {
+				s.sendEventErr(w, flusher, fmt.Errorf("读取日志文件失败: %w", err))
+			} else {
+				payload := rangePayload(c, res, from, to)
+				delete(payload, "entries")
+				sendEvent(w, "meta", payload)
+				for _, e := range res.Entries {
+					sendEntry(w, e)
+				}
+			}
 		} else {
-			for _, e := range entries {
-				sendEntry(w, e)
+			entries, err := logsrc.ReadTail(c.LogFile, tail, s.cfg.TailBytes)
+			if err != nil {
+				s.sendEventErr(w, flusher, fmt.Errorf("读取日志文件失败: %w", err))
+			} else {
+				for _, e := range entries {
+					sendEntry(w, e)
+				}
 			}
 		}
 		flusher.Flush()
@@ -475,6 +590,39 @@ func (s *Server) tailCount(raw string) int {
 		return s.cfg.TailMax
 	}
 	return n
+}
+
+// parseMs 解析"Unix 毫秒"时间参数。前端只有毫秒精度，
+// 用纳秒会在 JS 的 Number 上丢精度，接口一律收毫秒。
+func parseMs(raw string) int64 {
+	n, err := strconv.ParseInt(strings.TrimSpace(raw), 10, 64)
+	if err != nil || n <= 0 {
+		return 0
+	}
+	return n
+}
+
+// nsFromMs 把毫秒换成日志里用的纳秒时间戳。
+//
+// end 为 true 时取这一毫秒的最后一纳秒：界面上时间是精确到秒的，
+// 用户选了 13:48:00 自然是想到 13:48:00.999 为止，不该把这一秒里的日志切掉。
+func nsFromMs(ms int64, end bool) int64 {
+	if ms <= 0 {
+		return 0
+	}
+	if end {
+		return ms*int64(time.Millisecond) + int64(time.Millisecond) - 1
+	}
+	return ms * int64(time.Millisecond)
+}
+
+// sendEvent 写一条自定义事件的 SSE 消息（不带 id，避免影响重连去重）。
+func sendEvent(w io.Writer, event string, v any) {
+	data, err := json.Marshal(v)
+	if err != nil {
+		return
+	}
+	fmt.Fprintf(w, "event: %s\ndata: %s\n\n", event, data)
 }
 
 // sendEntry 写一条 SSE 消息。id 用纳秒时间戳，浏览器重连时会自动带回来。
