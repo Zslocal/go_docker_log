@@ -25,6 +25,11 @@ const MaxScanToken = 4 << 20
 type Entry struct {
 	// Ts 是 Unix 纳秒时间戳，0 表示该行没有可用时间（例如文件被外部工具截断）。
 	Ts int64 `json:"ts"`
+	// TsText 是 docker 写进日志文件里的原始时间串（RFC3339Nano，UTC），
+	// 只做透传不改写。界面要靠它显示得跟 `docker logs` 里一模一样：
+	// 纳秒时间戳约 1.7e18，超过 JS 的 Number.MAX_SAFE_INTEGER(9e15)，
+	// 转成数字再格式化必然丢精度，只有原串能保住纳秒位。
+	TsText string `json:"tsText"`
 	// Stream 取 stdout / stderr / raw（raw 表示这一行不是合法 JSON，按纯文本兜底）。
 	Stream string `json:"stream"`
 	// Log 是日志正文，保留原始换行。
@@ -76,7 +81,7 @@ func ParseLine(line []byte) (Entry, bool) {
 		return Entry{}, false
 	}
 
-	return Entry{Ts: raw.parseTime(), Stream: stream, Log: raw.Log}, true
+	return Entry{Ts: raw.parseTime(), TsText: raw.Time, Stream: stream, Log: raw.Log}, true
 }
 
 // assembler 把被拆开的多行日志拼回完整一条。
@@ -97,7 +102,8 @@ func (a *assembler) Feed(raw rawEntry, emit func(Entry)) {
 	if stream == "" {
 		stream = "stdout"
 	}
-	e := Entry{Ts: raw.parseTime(), Stream: stream, Log: raw.Log}
+	// 时间戳取第一片的：那才是这条日志真正被写下的时刻。
+	e := Entry{Ts: raw.parseTime(), TsText: raw.Time, Stream: stream, Log: raw.Log}
 
 	switch {
 	case raw.Partial:

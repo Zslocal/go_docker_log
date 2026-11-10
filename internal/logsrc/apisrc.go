@@ -168,23 +168,24 @@ func ParseAPILine(line string) Entry {
 		return Entry{}
 	}
 
-	ts, rest := splitTimestamp(line)
-	return Entry{Ts: ts, Stream: "stdout", Log: rest}
+	ts, tsText, rest := splitTimestamp(line)
+	return Entry{Ts: ts, TsText: tsText, Stream: "stdout", Log: rest}
 }
 
 // splitTimestamp 把行首的 RFC3339Nano 时间戳和正文分开。
 // 时间戳里不会有空格，所以第一个空格就是分隔点。
-func splitTimestamp(line string) (int64, string) {
+// 第二个返回值是时间戳原串，解析失败时为空——界面靠它跟 docker logs 逐位对齐。
+func splitTimestamp(line string) (int64, string, string) {
 	sp := strings.IndexByte(line, ' ')
 	if sp <= 0 {
-		return 0, line
+		return 0, "", line
 	}
 	t, err := time.Parse(time.RFC3339Nano, line[:sp])
 	if err != nil {
 		// 不是时间戳就整行当正文，别把内容吃掉。
-		return 0, line
+		return 0, "", line
 	}
-	return t.UnixNano(), line[sp+1:]
+	return t.UnixNano(), line[:sp], line[sp+1:]
 }
 
 // ContainerStats 是 /containers/{id}/stats 响应里我们用得到的字段。

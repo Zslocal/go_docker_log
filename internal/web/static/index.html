@@ -119,7 +119,12 @@ button{font:inherit;cursor:pointer;border-radius:6px}
 
 .line{display:flex;gap:9px;padding:0 16px;border-left:2px solid transparent}
 .line:hover{background:#0f1620}
-.line .ts{flex:0 0 92px;color:#4d5f70;font-size:11px;padding-top:2px;font-variant-numeric:tabular-nums}
+.line .ts{flex:0 0 auto;color:#4d5f70;font-size:11px;padding-top:2px;font-variant-numeric:tabular-nums;white-space:nowrap;overflow:hidden;text-overflow:clip}
+/* 时间列宽度跟着格式走：带日期的两档一样宽，只留时间的那档窄一些。
+   固定宽度是为了让所有行的正文从同一列开始，不随内容长短抖动。 */
+.viewer.tst-datetime .line .ts,
+.viewer.tst-utc .line .ts{flex-basis:152px}
+.viewer.tst-time .line .ts{flex-basis:82px}
 .line .st{flex:0 0 auto;font-size:9.5px;letter-spacing:.3px;padding:0 4px;border-radius:3px;height:15px;line-height:15px;margin-top:2px;text-align:center;min-width:28px}
 .st.out{color:#5f7d99;background:rgba(95,125,153,.13)}
 .st.err{color:#e06c75;background:rgba(224,108,117,.15)}
@@ -218,6 +223,7 @@ mark{background:rgba(76,154,255,.3);color:inherit;border-radius:2px;padding:0 1p
       <label class="switch" title="进入容器时向上回溯多少行历史日志">历史
         <select class="hsize" id="hsize"></select>
       </label>
+      <button class="ghost" id="btnTs" title="切换左边时间列的显示格式（点一下换一种）">时间：Docker</button>
       <span class="count" id="count">0 行</span>
     </div>
 
@@ -246,6 +252,14 @@ mark{background:rgba(76,154,255,.3);color:inherit;border-radius:2px;padding:0 1p
   var HSIZE_LIST = [200, 400, 1000, 2000, 5000];
   var HSIZE_KEY = 'dlog.hsize';
 
+  // 时间列三种格式：
+  //   datetime - 2026-11-10 13:48:00.003（本地时区，默认）
+  //   utc      - 2026-11-10 05:48:00.003（与 docker logs 里的时间同值）
+  //   time     - 13:48:00.003（仅本地时间，看密集日志时省横向空间）
+  var TS_MODES = ['datetime', 'utc', 'time'];
+  var TS_LABEL = { datetime: '日期+时间', utc: 'UTC', time: '仅时间' };
+  var TS_KEY = 'dlog.tsMode';
+
   var S = {
     containers: [],
     current: null,
@@ -260,6 +274,7 @@ mark{background:rgba(76,154,255,.3);color:inherit;border-radius:2px;padding:0 1p
     statsOK: false,
     statsTimer: null,
     hsize: 400,
+    tsMode: 'datetime',
     mountBroken: false
   };
 
@@ -277,10 +292,46 @@ mark{background:rgba(76,154,255,.3);color:inherit;border-radius:2px;padding:0 1p
 
   function pad(n, w) { return String(n).padStart(w || 2, '0'); }
 
-  function fmtTs(ns) {
-    if (!ns) return '--:--:--.---';
-    var d = new Date(ns / 1e6);
-    return pad(d.getHours()) + ':' + pad(d.getMinutes()) + ':' + pad(d.getSeconds()) + '.' + pad(d.getMilliseconds(), 3);
+  // entryDate 优先用 docker 写的原串来构造时间：Unix 纳秒约 1.7e18，
+  // 超过 JS 的安全整数上限（9007199254740991），走 e.ts/1e6 会在毫秒位打滑。
+  // 原串（RFC3339Nano）交给 Date.parse 能稳定还原到毫秒。
+  function entryDate(e) {
+    if (e.tsText) {
+      var p = Date.parse(e.tsText);
+      if (!isNaN(p)) return new Date(p);
+    }
+    if (e.ts) return new Date(e.ts / 1e6);
+    return null;
+  }
+
+  function hasTs(e) { return !!(e.ts || e.tsText); }
+
+  // 按 utc / 本地拼出 "2026-11-10 13:48:00.003"，withDate 为 false 时只给时分秒
+  function fmtClock(d, utc, withDate) {
+    var g = utc ? 'getUTC' : 'get';
+    var t = pad(d[g + 'Hours']()) + ':' + pad(d[g + 'Minutes']()) + ':' + pad(d[g + 'Seconds']()) + '.' + pad(d.getMilliseconds(), 3);
+    if (!withDate) return t;
+    return d[g + 'FullYear']() + '-' + pad(d[g + 'Month']() + 1) + '-' + pad(d[g + 'Date']()) + ' ' + t;
+  }
+
+  function fmtTs(e) {
+    if (!hasTs(e)) return '—';
+    var d = entryDate(e);
+    if (!d) return e.tsText || '—';
+    if (S.tsMode === 'utc') return fmtClock(d, true, true);
+    if (S.tsMode === 'time') return fmtClock(d, false, false);
+    return fmtClock(d, false, true);
+  }
+
+  // 悬停时两种时区都给出，方便跟 `date -u` / docker logs 互相印证
+  function tsTitle(e) {
+    if (!hasTs(e)) return '';
+    var d = entryDate(e);
+    var out = [];
+    out.push('本地  ' + (d ? fmtClock(d, false, true) : '—'));
+    out.push('UTC   ' + (d ? fmtClock(d, true, true) : '—'));
+    if (e.tsText) out.push('原始  ' + e.tsText);
+    return out.join('\n');
   }
 
   function fmtSize(n) {
@@ -363,7 +414,9 @@ mark{background:rgba(76,154,255,.3);color:inherit;border-radius:2px;padding:0 1p
 
     var ts = document.createElement('span');
     ts.className = 'ts';
-    ts.textContent = fmtTs(e.ts);
+    ts.textContent = fmtTs(e);
+    var tip = tsTitle(e);
+    if (tip) ts.title = tip;
 
     var st = document.createElement('span');
     st.className = 'st ' + (e.stream === 'stderr' ? 'err' : e.stream === 'raw' ? 'raw' : 'out');
@@ -913,7 +966,54 @@ mark{background:rgba(76,154,255,.3);color:inherit;border-radius:2px;padding:0 1p
     }
   });
 
+  // ---------------- 时间列格式 ----------------
+
+  var TS_HINT = {
+    datetime: '本地时区，2026-11-10 13:48:00.003',
+    utc: 'UTC 时区，与 docker logs 里显示的时间同值',
+    time: '本地时区，只显示时分秒，省横向空间'
+  };
+
+  function savedTsMode() {
+    try {
+      var v = localStorage.getItem(TS_KEY);
+      if (TS_MODES.indexOf(v) >= 0) return v;
+    } catch (err) { /* 隐私模式下 localStorage 可能不可用 */ }
+    return 'datetime';
+  }
+
+  function applyTsMode(mode) {
+    if (TS_MODES.indexOf(mode) < 0) mode = 'datetime';
+    S.tsMode = mode;
+
+    // 列宽由 viewer 上的 class 决定，三种格式宽度不同
+    for (var k = 0; k < TS_MODES.length; k++) viewer.classList.remove('tst-' + TS_MODES[k]);
+    viewer.classList.add('tst-' + mode);
+
+    var btn = $('btnTs');
+    btn.textContent = '时间：' + TS_LABEL[mode];
+    btn.title = TS_HINT[mode] + '（点一下换一种）';
+
+    try { localStorage.setItem(TS_KEY, mode); } catch (err) { /* 忽略 */ }
+
+    // 行里的时间是渲染时写死的文本，换格式必须重建 DOM。
+    // 停在中间看日志时别把人弹回底部，退出自动滚动状态下保持原位置。
+    for (var i = 0; i < S.entries.length; i++) S.entries[i].el = null;
+    if (S.entries.length) {
+      var keepTop = viewer.scrollTop;
+      rerender();
+      if (!S.autoScroll) viewer.scrollTop = keepTop;
+    }
+  }
+
+  $('btnTs').addEventListener('click', function () {
+    var i = TS_MODES.indexOf(S.tsMode);
+    applyTsMode(TS_MODES[(i + 1) % TS_MODES.length]);
+  });
+
   // ---------------- 启动 ----------------
+
+  applyTsMode(savedTsMode());
 
   // 先用本地记住的档位渲染一遍，避免首屏按默认值请求；
   // meta 返回后再用服务端 tail-max 校正可选项。

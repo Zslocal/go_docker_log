@@ -174,6 +174,35 @@ func TestParseLineTTYHasNoStream(t *testing.T) {
 	}
 }
 
+// tsText 是日志文件里的原串，必须原样透传：它要拿去跟 `docker logs` 逐位对照，
+// 任何重格式化（改时区、截精度）都会让两边对不上。
+func TestParseLineKeepsRawTimeText(t *testing.T) {
+	cases := []string{
+		"2026-11-10T05:48:00.003429131Z",
+		"2026-11-10T05:48:00.00245161Z", // 纳秒位不足 9 位，docker 会省略后缀 0
+		"2026-11-10T13:48:00+08:00",     // 带偏移量而非 Z
+	}
+	for _, want := range cases {
+		line := `{"log":"x\n","stream":"stdout","time":"` + want + `"}`
+		e, ok := ParseLine([]byte(line))
+		if !ok {
+			t.Fatalf("%s 应当被解析", want)
+		}
+		if e.TsText != want {
+			t.Errorf("TsText = %q, 期望 %q", e.TsText, want)
+		}
+		if e.Ts == 0 {
+			t.Errorf("%s 的 Ts 不应为 0", want)
+		}
+	}
+
+	// 非 JSON 行没有时间可用，TsText 留空让前端显示占位符
+	e, ok := ParseLine([]byte("plain text"))
+	if !ok || e.TsText != "" || e.Ts != 0 {
+		t.Errorf("纯文本行不该带时间: %+v", e)
+	}
+}
+
 func TestParseLineSkipsEmpty(t *testing.T) {
 	if _, ok := ParseLine(nil); ok {
 		t.Errorf("空行不该展示")
@@ -323,11 +352,19 @@ func TestParseAPILine(t *testing.T) {
 	if e.Ts == 0 {
 		t.Errorf("时间戳应为 0 以外")
 	}
+	// 原串必须逐字保留：界面靠它还原纳秒级时间，
+	// 而 e.Ts 这个 int64 到了 JS 里会被 double 截掉后几位。
+	if e.TsText != "2026-11-09T01:02:03.123456789Z" {
+		t.Errorf("TsText = %q, 期望原串", e.TsText)
+	}
 
 	// 没有时间戳前缀时整行当正文，不能把内容吃掉
 	e = ParseAPILine("plain text without timestamp")
 	if e.Log != "plain text without timestamp" || e.Ts != 0 {
 		t.Errorf("无时间戳时处理错误: %+v", e)
+	}
+	if e.TsText != "" {
+		t.Errorf("无时间戳时 TsText 应为空, 实际 %q", e.TsText)
 	}
 }
 
